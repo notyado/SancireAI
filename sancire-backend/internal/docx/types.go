@@ -1,0 +1,76 @@
+package docx
+import (
+	"sancireai/backend/internal/matrix"
+)
+// AuditSeverity level
+type AuditSeverity string
+const (
+	SeverityCritical AuditSeverity = "CRITICAL" // Блокирующие ошибки
+	SeverityWarning  AuditSeverity = "WARNING"  // Предупреждения
+	SeverityInfo     AuditSeverity = "INFO"     // Рекомендации
+)
+// TrafficLight status
+type TrafficLight string
+const (
+	TrafficLightGreen  TrafficLight = "READY"    // Готов к согласованию
+	TrafficLightYellow TrafficLight = "WARNINGS" // Требует внимания
+	TrafficLightRed    TrafficLight = "CRITICAL" // Критические ошибки
+)
+// AuditFinding represents one issue found in a document
+type AuditFinding struct {
+	ID          string        `json:"id"`
+	Severity    AuditSeverity `json:"severity"`
+	Title       string        `json:"title"`
+	Description string        `json:"description"`
+	Location    string        `json:"location,omitempty"`
+	RuleCitation string       `json:"ruleCitation"`
+	Recommendation string     `json:"recommendation"`
+}
+// AuditReport is the full report returned by the Auditor
+type AuditReport struct {
+	FileName        string                        `json:"fileName"`
+	FileSize        int64                         `json:"fileSize"`
+	Status          TrafficLight                  `json:"status"`
+	StatusSummary   string                        `json:"statusSummary"`
+	DetectedKind    matrix.DocKind                `json:"detectedKind"`
+	DetectedModule  string                        `json:"detectedModule,omitempty"`
+	MatchedModuleID string                        `json:"matchedModuleID,omitempty"`
+	TotalFindings   int                           `json:"totalFindings"`
+	CriticalCount   int                           `json:"criticalCount"`
+	WarningCount    int                           `json:"warningCount"`
+	InfoCount       int                           `json:"infoCount"`
+	Findings        []AuditFinding                `json:"findings"`
+	VisaRouting     matrix.VisaCalculationResult  `json:"visaRouting"`
+}
+// ModuleDefinition provides metadata and variable parameters for a module
+type ModuleDefinition struct {
+	ID          string            `json:"id"`
+	Code        string            `json:"code"`
+	Title       string            `json:"title"`
+	FileName    string            `json:"fileName"`
+	Description string            `json:"description"`
+	Kind        matrix.DocKind    `json:"kind"`
+	Fields      []ModuleField     `json:"fields"`
+	Active      bool              `json:"active"`
+	Triggers    []string          `json:"triggers,omitempty"` // phrases that detect this module in chat
+	Anchors     []string          `json:"anchors,omitempty"`  // constant wording checked by the auditor
+	Category    string            `json:"category,omitempty"`
+}
+// ModuleField defines one variable field in a modular document
+type ModuleField struct {
+	Key          string   `json:"key"`
+	Label        string   `json:"label"`
+	Question     string   `json:"question,omitempty"`     // friendly phrasing used by the chat wizard
+	Placeholder  string   `json:"placeholder"`            // example value shown in the form
+	Type         string   `json:"type"`                   // "text", "date", "choice", "textarea"
+	Required     bool     `json:"required"`
+	Routing      bool     `json:"routing,omitempty"`      // affects visa routing only, not the text
+	Options      []string `json:"options,omitempty"`
+	SyncTargets  []string `json:"syncTargets,omitempty"` // keys where same value repeats
+	HelperNote   string   `json:"helperNote,omitempty"`
+}
+
+// ModuleIDs returns all module codes in stable order (M-01 … M-07).
+func ModuleIDs() []string {
+	return []string{"M-01", "M-02", "M-03", "M-04", "M-05", "M-06", "M-07"}
+}

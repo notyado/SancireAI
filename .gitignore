@@ -1,0 +1,56 @@
+# Case materials / documents
+*.pdf
+Ке*Банка*России*.pdf
+Кейс_Банка_России_ЦДОБР.pdf
+Кейс_Банка_России_ЦДОБР.pdf
+
+# Frontend dependencies & build outputs
+node_modules/
+sancire-frontend/node_modules/
+sancire-frontend/dist/
+sancire-frontend/.vite/
+sancire-frontend/tsconfig.tsbuildinfo
+
+# Backend binaries & build outputs
+sancire-backend/bin/
+backend/bin/
+bin/
+/sancire-server
+/qdrantload
+/mktemplates
+sancire-backend/sancire-server
+sancire-backend/qdrantload
+sancire-backend/mktemplates
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Runtime data, SQLite database, uploads and generated files
+sancire-backend/data/*
+!sancire-backend/data/.gitkeep
+backend/data/*
+!backend/data/.gitkeep
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Environment files and credentials
+.env
+.env.*
+!.env.example
+*.local
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
