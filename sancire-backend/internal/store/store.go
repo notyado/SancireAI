@@ -832,11 +832,11 @@ func (s *Store) SetRegulationStatus(id, status string) (prevActiveIDs []string, 
 	if _, err = tx.Exec(`UPDATE regulations SET status = ?, updated_at = ? WHERE id = ?`, status, time.Now().UTC(), id); err != nil {
 		return nil, nil, err
 	}
-	if status == RegActive {
-		targetIDs, err = s.chunkIDsTx(tx, id)
-		if err != nil {
-			return nil, nil, err
-		}
+	// Чанки самой редакции нужны в обоих случаях: при активации их кладём в
+	// Qdrant, при архиве — наоборот, убираем оттуда.
+	targetIDs, err = s.chunkIDsTx(tx, id)
+	if err != nil {
+		return nil, nil, err
 	}
 	if err = tx.Commit(); err != nil {
 		return nil, nil, err

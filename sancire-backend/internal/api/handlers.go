@@ -245,6 +245,8 @@ type chatBody struct {
 	Selection      string        `json:"selection"`
 }
 
+const actionClarify = "clarify"
+
 // generateTurn routes one chat turn either to the deterministic dialog engine
 // (wizard / knowledge / audit) or to the local LLM for the «Объяснить» and
 // «Эксперт» actions. It persists wizard draft state and generated artifacts.
@@ -865,9 +867,16 @@ func (h *Handler) handleRegulationStatus(w http.ResponseWriter, r *http.Request,
 	}
 	h.refreshRegulationIndex()
 	// Best-effort Qdrant sync (async — never blocks the admin action).
-	if len(prevIDs) > 0 {
-		ids := prevIDs
-		h.asyncQdrant(qdrantRemoveTimeout, "previous active points not removed",
+	// Убираем из индекса предыдущие активные редакции и, если документ
+	// уходит в архив, — его собственные фрагменты (иначе архивная редакция
+	// продолжает находиться в векторном поиске).
+	removeIDs := append([]string{}, prevIDs...)
+	if status != store.RegActive {
+		removeIDs = append(removeIDs, targetIDs...)
+	}
+	if len(removeIDs) > 0 {
+		ids := removeIDs
+		h.asyncQdrant(qdrantRemoveTimeout, "points not removed",
 			func(ctx context.Context) error { return h.rag.RemoveChunkPoints(ctx, ids) })
 	}
 	if status == store.RegActive && len(targetIDs) > 0 {
@@ -896,8 +905,7 @@ func (h *Handler) handleArchiveRegulation(w http.ResponseWriter, r *http.Request
 // handleDeleteRegulation DELETE /api/admin/regulations/{id}
 func (h *Handler) handleDeleteRegulation(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	reg, err := h.store.GetRegulation(id)
-	if err != nil {
+	if _, err := h.store.GetRegulation(id); err != nil {
 		writeError(w, http.StatusNotFound, "not_found", "")
 		return
 	}
@@ -917,7 +925,8 @@ func (h *Handler) handleDeleteRegulation(w http.ResponseWriter, r *http.Request)
 		log.Warn().Err(err).Str("path", filePath).Msg("uploaded regulation file not removed")
 	}
 	h.refreshRegulationIndex()
-	if reg.Status == store.RegActive && len(chunkIDs) > 0 {
+	// Векторы удаляем независимо от статуса: документ мог быть в архиве.
+	if len(chunkIDs) > 0 {
 		h.asyncQdrant(qdrantCleanupTimeout, "points of a deleted regulation not removed",
 			func(ctx context.Context) error { return h.rag.RemoveChunkPoints(ctx, chunkIDs) })
 	}

@@ -181,7 +181,11 @@ func (e *Engine) Section(id string) (kb.Chunk, bool) {
 	if e.ix == nil {
 		return kb.Chunk{}, false
 	}
-	return e.ix.Get(id)
+	c, ok := e.ix.Get(id)
+	if !ok || c == nil {
+		return kb.Chunk{}, false
+	}
+	return *c, true
 }
 
 // CorpusSize reports how many knowledge chunks are currently indexed. It backs

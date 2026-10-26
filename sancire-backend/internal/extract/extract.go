@@ -94,7 +94,7 @@ func fromPDF(data []byte) (string, error) {
 }
 
 func normalize(s string) string {
-	s = reXMLSpace.ReplaceAllString(s, "\n\n")
+	s = reBlankLines.ReplaceAllString(s, "\n\n")
 	if !utf8.ValidString(s) {
 		s = strings.ToValidUTF8(s, "")
 	}

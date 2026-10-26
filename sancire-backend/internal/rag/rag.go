@@ -91,6 +91,8 @@ type EngineConfig struct {
 	LLMModel          string
 	EmbedModel        string
 	MinRelevanceScore float64
+	// EmbedTimeout — таймаут одного запроса эмбеддинга. Ноль → 10s.
+	EmbedTimeout time.Duration
 }
 
 // Engine talks to the local (on-premise) inference stack: Ollama for
@@ -107,7 +109,15 @@ type Engine struct {
 	}
 }
 
+// ollamaKeepAlive — сколько Ollama держит модель в памяти после запроса.
+// Дефолт Ollama (5 минут) заставляет перезагружать веса после каждой паузы,
+// что на удалённой машине добавляет десятки секунд к первому ответу.
+const ollamaKeepAlive = "24h"
+
 func NewEngine(cfg EngineConfig) *Engine {
+	if cfg.EmbedTimeout <= 0 {
+		cfg.EmbedTimeout = 10 * time.Second
+	}
 	return &Engine{
 		cfg:        cfg,
 		httpClient: &http.Client{Timeout: httpClientTimeout},
@@ -185,7 +195,7 @@ func (e *Engine) VectorSearchText(ctx context.Context, query string, limit int) 
 	if !e.VectorHealthy(ctx) {
 		return nil, errors.New("qdrant unavailable")
 	}
-	embCtx, cancel := context.WithTimeout(ctx, embedTimeout)
+	embCtx, cancel := context.WithTimeout(ctx, e.cfg.EmbedTimeout)
 	defer cancel()
 	emb, err := e.getEmbedding(embCtx, query)
 	if err != nil {
@@ -317,7 +327,7 @@ func (e *Engine) PushChunks(ctx context.Context, chunks []ScoredChunk) error {
 	}
 	var points []point
 	for i, c := range chunks {
-		ectx, cancel := context.WithTimeout(ctx, pushChunkTimeout)
+		ectx, cancel := context.WithTimeout(ctx, e.cfg.EmbedTimeout)
 		emb, err := e.getEmbedding(ectx, c.Text)
 		cancel()
 		if err != nil {
@@ -475,9 +485,13 @@ func (e *Engine) LoadCorpus(ctx context.Context, ix *kb.Index, limit int) (int, 
 
 // getEmbedding requests a vector from the local embedding model.
 func (e *Engine) getEmbedding(ctx context.Context, text string) ([]float32, error) {
+	// keep_alive: модель эмбеддингов живёт на ноутбуке за туннелем — не даём
+	// Ollama выгрузить её после 5 минут простоя, иначе каждый первый запрос
+	// после паузы ждёт перезагрузку весов.
 	reqBody, err := json.Marshal(map[string]any{
-		"model":  e.cfg.EmbedModel,
-		"prompt": text,
+		"model":      e.cfg.EmbedModel,
+		"prompt":     text,
+		"keep_alive": ollamaKeepAlive,
 	})
 	if err != nil {
 		return nil, err
@@ -696,6 +710,9 @@ func (e *Engine) callLLMWithSystem(ctx context.Context, systemPrompt, userMessag
 		"messages": msgs,
 		"stream":   tokenCallback != nil,
 		"think":    false,
+		// Модель может жить на другой машине (ноутбук за SSH-туннелем):
+		// держим её в памяти, чтобы после простоя не ждать загрузку весов.
+		"keep_alive": ollamaKeepAlive,
 		"options": map[string]any{
 			"temperature": 0.2,
 			"num_predict": 1024,

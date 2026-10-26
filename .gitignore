@@ -51,3 +51,5 @@ Thumbs.db
 # Logs
 *.log
 logs/
+# SSH-ключ туннеля Ollama (секрет, не коммитить)
+deploy/laptop/*.key

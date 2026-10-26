@@ -44,6 +44,7 @@ type Config struct {
 	LLMModel          string
 	EmbedModel        string
 	MinRelevanceScore float64
+	EmbedTimeout      time.Duration
 	JWTSecret         string
 	TokenTTL          time.Duration
 	CORSOrigins       []string
@@ -54,6 +55,14 @@ func Load() Config {
 	minScore := getEnvFloat("SANCIRE_MIN_SCORE", DefaultMinRelevanceScore)
 	tokenTTL := getEnvDuration("SANCIRE_TOKEN_TTL", DefaultTokenTTL)
 
+	// Эмбеддинги могут считаться не на этой машине (например, на ноутбуке
+	// за SSH-туннелем), поэтому таймаут одного запроса настраивается.
+	embedTimeout := getEnvDuration("SANCIRE_EMBED_TIMEOUT", 10*time.Second)
+	if raw := os.Getenv("SANCIRE_EMBED_TIMEOUT"); raw != "" {
+		if sec, err := strconv.Atoi(raw); err == nil && sec > 0 {
+			embedTimeout = time.Duration(sec) * time.Second
+		}
+	}
 	secret := os.Getenv("SANCIRE_JWT_SECRET")
 	if secret == "" {
 		// Never ship a predictable signing key. Without an explicit deployment key,
@@ -78,6 +87,7 @@ func Load() Config {
 		LLMModel:          getEnv("SANCIRE_LLM_MODEL", "qwen3.5:4b"),
 		EmbedModel:        getEnv("SANCIRE_EMBED_MODEL", "qwen3-embedding:0.6b"),
 		MinRelevanceScore: minScore,
+		EmbedTimeout:      embedTimeout,
 		JWTSecret:         secret,
 		TokenTTL:          tokenTTL,
 		CORSOrigins:       getEnvList("SANCIRE_CORS_ORIGINS", DefaultCORSOrigins),

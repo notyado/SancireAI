@@ -134,16 +134,22 @@ export function ChatView({ conversationId }: { conversationId: string }) {
     void refreshConversations();
   }, [refreshConversations]);
 
+function safeRandomId(prefix: string): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    try {
+      return `${prefix}-${crypto.randomUUID()}`;
+    } catch {}
+  }
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
   async function ask(text: string, files: AttachedFile[] = [], extra?: AskExtra) {
     if (requestInFlight.current) return;
     const cleanText = text.trim();
     if (!cleanText && files.length === 0 && extra?.action !== "expert") return;
-    requestInFlight.current = true;
-    pinnedToBottom.current = true;
-    setPending(true);
 
-    const localUserId = `local-${crypto.randomUUID()}`;
-    const localAssistantId = `stream-${crypto.randomUUID()}`;
+    const localUserId = safeRandomId("local");
+    const localAssistantId = safeRandomId("stream");
     const userContent = cleanText || (files[0] ? `Проверьте документ: ${files[0].name}` : "Вопрос эксперту");
     const localUser: MessageRow = {
       id: localUserId,
@@ -153,6 +159,10 @@ export function ChatView({ conversationId }: { conversationId: string }) {
       meta: files.length ? { files } : null,
       createdAt: new Date().toISOString(),
     };
+
+    requestInFlight.current = true;
+    pinnedToBottom.current = true;
+    setPending(true);
     setStreamingId(localAssistantId);
     streamingAsstIdRef.current = localAssistantId;
     streamedContentRef.current = "";

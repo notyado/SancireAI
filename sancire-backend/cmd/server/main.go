@@ -51,6 +51,7 @@ func main() {
 		LLMModel:          cfg.LLMModel,
 		EmbedModel:        cfg.EmbedModel,
 		MinRelevanceScore: cfg.MinRelevanceScore,
+		EmbedTimeout:      cfg.EmbedTimeout,
 	})
 
 	server := &http.Server{

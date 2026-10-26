@@ -53,6 +53,7 @@ func main() {
 		LLMModel:          cfg.LLMModel,
 		EmbedModel:        cfg.EmbedModel,
 		MinRelevanceScore: cfg.MinRelevanceScore,
+		EmbedTimeout:      cfg.EmbedTimeout,
 	})
 
 	if !eng.VectorHealthy(ctx) {
