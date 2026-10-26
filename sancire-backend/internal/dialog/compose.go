@@ -261,7 +261,10 @@ func aiMeta(ans string, candidates []kb.Scored, norm string) Meta {
 			sources = append(sources, sourceOf(c))
 		}
 	}
-	top := candidates[0].Chunk
+	var top *kb.Chunk
+	if len(candidates) > 0 {
+		top = candidates[0].Chunk
+	}
 	meta := Meta{
 		Intent:    "answer.ai",
 		Sources:   sources,
