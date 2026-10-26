@@ -6,12 +6,13 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
+	"testing"
+	"time"
+
 	"sancireai/backend/internal/config"
 	"sancireai/backend/internal/rag"
 	"sancireai/backend/internal/store"
-	"testing"
 )
 
 func setupTestServer(t *testing.T) (http.Handler, func()) {
@@ -22,15 +23,15 @@ func setupTestServer(t *testing.T) (http.Handler, func()) {
 	}
 	cfg := config.Config{
 		JWTSecret:    "test-secret",
-		TokenTTL:     3600 * 1e9,
+		TokenTTL:     time.Hour,
 		TemplatesDir: "../../templates",
 	}
 	ragEngine := rag.NewEngine(rag.EngineConfig{})
 	handler := NewHandler(cfg, s, ragEngine)
 	router := SetupRouter(handler)
+	// t.TempDir() removes the database file itself.
 	return router, func() {
 		s.Close()
-		os.Remove(tmpDB)
 	}
 }
 func TestAPI_AuthAndRBAC(t *testing.T) {

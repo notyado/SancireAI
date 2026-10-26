@@ -1,10 +1,13 @@
 package matrix
+
 import (
 	"fmt"
 	"strings"
 )
+
 // DocKind represents general type of document
 type DocKind string
+
 const (
 	KindOrder     DocKind = "ПРИКАЗ"
 	KindDirective DocKind = "РАСПОРЯЖЕНИЕ"
@@ -12,6 +15,7 @@ const (
 	KindMemo      DocKind = "СЛУЖЕБНАЯ ЗАПИСКА"
 	KindUnknown   DocKind = "НЕ ОПРЕДЕЛЕН"
 )
+
 // Department constants
 const (
 	DeptLegal           = "Юридическое подразделение"
@@ -22,6 +26,7 @@ const (
 	DeptInternalControl = "Департамент внутреннего контроля"
 	DeptIntlCooperation = "Департамент международного сотрудничества"
 )
+
 // VisaRequirement describes visa status for a department
 type VisaRequirement struct {
 	Department string `json:"department"`
@@ -41,6 +46,7 @@ type MatrixRow struct {
 	OtherDept   []string `json:"otherDept"`
 	Condition   string   `json:"condition,omitempty"`
 }
+
 // RouteStep represents one stage in Chapter 10 of DOU Instruction
 type RouteStep struct {
 	Order       int    `json:"order"`
@@ -49,6 +55,7 @@ type RouteStep struct {
 	Description string `json:"description"`
 	Deadline    string `json:"deadline"`
 }
+
 // DocumentContext contains attributes needed to determine routing
 type DocumentContext struct {
 	Kind              DocKind  `json:"kind"`
@@ -60,18 +67,20 @@ type DocumentContext struct {
 	MatchedModuleID   string   `json:"matchedModuleID"`
 	CustomWording     bool     `json:"customWording"`     // Изменены ли постоянные формулировки эталона
 }
+
 // VisaCalculationResult contains full calculated routing
 type VisaCalculationResult struct {
 	Kind            DocKind           `json:"kind"`
 	MatchedRows     []MatrixRow       `json:"matchedRows"`
 	RequiredVisas   []VisaRequirement `json:"requiredVisas"`
 	RouteSteps      []RouteStep       `json:"routeSteps"`
-	ModulePrivilege bool              `json:"modulePrivilege"`
-	PrivilegeNote   string            `json:"privilegeNote,omitempty"`
-	PrivilegeWarning string           `json:"privilegeWarning,omitempty"`
-	AppliedRules    []string          `json:"appliedRules"` // deterministic justification of the route
-	NormativeBasis  string            `json:"normativeBasis"`
+	ModulePrivilege  bool              `json:"modulePrivilege"`
+	PrivilegeNote    string            `json:"privilegeNote,omitempty"`
+	PrivilegeWarning string            `json:"privilegeWarning,omitempty"`
+	AppliedRules     []string          `json:"appliedRules"` // deterministic justification of the route
+	NormativeBasis   string            `json:"normativeBasis"`
 }
+
 // Standard Matrix definition (10 rows)
 var StandardMatrix = []MatrixRow{
 	// 1. Внутренние документы
@@ -172,6 +181,7 @@ var StandardMatrix = []MatrixRow{
 		HR:          false,
 	},
 }
+
 // DetectDocKind analyzes document text and title to classify document
 func DetectDocKind(title, content string) DocKind {
 	upper := strings.ToUpper(title + " " + content)
@@ -189,6 +199,19 @@ func DetectDocKind(title, content string) DocKind {
 	}
 	return KindUnknown
 }
+
+// rowByNumber returns the Matrix row with the given ordinal number. Rows are
+// addressed by number instead of slice index so that reordering StandardMatrix
+// cannot silently misroute a document.
+func rowByNumber(n int) MatrixRow {
+	for _, row := range StandardMatrix {
+		if row.RowNumber == n {
+			return row
+		}
+	}
+	return MatrixRow{ID: fmt.Sprintf("row_%d", n), RowNumber: n, Category: "Не классифицировано"}
+}
+
 // CalculateVisas calculates full visa requirements using matrix and conditions
 func CalculateVisas(ctx DocumentContext) VisaCalculationResult {
 	res := VisaCalculationResult{
@@ -196,6 +219,9 @@ func CalculateVisas(ctx DocumentContext) VisaCalculationResult {
 		NormativeBasis: "Матрица обязательного визирования (п. 1–3) и Глава 10 Инструкции по ДОУ № ОД-184",
 	}
 	deptMap := make(map[string]VisaRequirement)
+	// Row numbers whose «особое условие» actually fired, used later to justify
+	// the route deterministically.
+	triggeredConditions := make(map[int]bool)
 	// Always require DOU
 	deptMap[DeptDOU] = VisaRequirement{
 		Department: DeptDOU,
@@ -209,28 +235,29 @@ func CalculateVisas(ctx DocumentContext) VisaCalculationResult {
 		// External letters
 		switch ctx.AddresseeType {
 		case "foreign_org":
-			matched = append(matched, StandardMatrix[8]) // Row 9
+			matched = append(matched, rowByNumber(9))
 			deptMap[DeptLegal] = VisaRequirement{Department: DeptLegal, Required: true, Reason: "Правовая экспертиза внешнего письма иностранному партнеру", Deadline: "До 3 рабочих дней"}
 			deptMap[DeptIntlCooperation] = VisaRequirement{Department: DeptIntlCooperation, Required: true, Reason: "Строка 9 Матрицы: согласование международных контактов", Deadline: "До 3 рабочих дней"}
 		case "state_authority":
-			matched = append(matched, StandardMatrix[7]) // Row 8
+			matched = append(matched, rowByNumber(8))
 			deptMap[DeptLegal] = VisaRequirement{Department: DeptLegal, Required: true, Reason: "Правовая экспертиза обращения в органы государственной власти РФ", Deadline: "До 3 рабочих дней"}
 			deptMap[DeptInternalControl] = VisaRequirement{Department: DeptInternalControl, Required: true, Reason: "Строка 8 Матрицы: контроль переписки с органами власти", Deadline: "До 3 рабочих дней"}
 		default:
-			matched = append(matched, StandardMatrix[9]) // Row 10
+			matched = append(matched, rowByNumber(10))
 			deptMap[DeptLegal] = VisaRequirement{Department: DeptLegal, Required: true, Reason: "Правовая экспертиза письма российским юрлицам", Deadline: "До 3 рабочих дней"}
 		}
 	} else if ctx.Kind == KindOrder {
 		// Orders
 		if strings.Contains(normTitle, "календар") || strings.Contains(normTitle, "выходн") || strings.Contains(normTitle, "праздничн") {
-			matched = append(matched, StandardMatrix[0]) // Row 1
+			matched = append(matched, rowByNumber(1))
 			deptMap[DeptLegal] = VisaRequirement{Department: DeptLegal, Required: true, Reason: "Строка 1 Матрицы: рабочий календарь", Deadline: "До 3 рабочих дней"}
 			deptMap[DeptHR] = VisaRequirement{Department: DeptHR, Required: true, Reason: "Строка 1 Матрицы: кадровые условия труда", Deadline: "До 3 рабочих дней"}
 		} else if strings.Contains(normTitle, "прием") || strings.Contains(normTitle, "передач") || ctx.MatchedModuleID == "M-03" {
-			matched = append(matched, StandardMatrix[1]) // Row 2
+			matched = append(matched, rowByNumber(2))
 			deptMap[DeptLegal] = VisaRequirement{Department: DeptLegal, Required: true, Reason: "Строка 2 Матрицы: прием-передача дел и имущества", Deadline: "До 3 рабочих дней"}
 			deptMap[DeptHR] = VisaRequirement{Department: DeptHR, Required: true, Reason: "Строка 2 Матрицы: кадровая проверка должностей сдатчика и приемщика", Deadline: "До 3 рабочих дней"}
 			if ctx.HasISAccessChange {
+				triggeredConditions[2] = true
 				deptMap[DeptInfoSec] = VisaRequirement{
 					Department: DeptInfoSec,
 					Required:   true,
@@ -239,13 +266,13 @@ func CalculateVisas(ctx DocumentContext) VisaCalculationResult {
 				}
 			}
 		} else if strings.Contains(normTitle, "информационн") || strings.Contains(normTitle, "эксплуатац") || ctx.MatchedModuleID == "M-01" {
-			matched = append(matched, StandardMatrix[2]) // Row 3
+			matched = append(matched, rowByNumber(3))
 			deptMap[DeptLegal] = VisaRequirement{Department: DeptLegal, Required: true, Reason: "Строка 3 Матрицы: ввод/изменение информационной системы", Deadline: "До 3 рабочих дней"}
 			deptMap[DeptInfoSec] = VisaRequirement{Department: DeptInfoSec, Required: true, Reason: "Строка 3 Матрицы: оценка безопасности внедряемой ИС", Deadline: "До 3 рабочих дней"}
 			deptMap[DeptIT] = VisaRequirement{Department: DeptIT, Required: true, Reason: "Строка 3 Матрицы: техническое сопровождение и эксплуатация ИС", Deadline: "До 3 рабочих дней"}
 		} else {
-			// Other orders (Row 4)
-			matched = append(matched, StandardMatrix[3])
+			// Прочие приказы по основной деятельности
+			matched = append(matched, rowByNumber(4))
 			deptMap[DeptLegal] = VisaRequirement{Department: DeptLegal, Required: true, Reason: "Строка 4 Матрицы: прочие приказы по основной деятельности", Deadline: "До 3 рабочих дней"}
 			if ctx.MatchedModuleID == "M-02" {
 				deptMap[DeptHR] = VisaRequirement{Department: DeptHR, Required: true, Reason: "Назначение ответственных за делопроизводство в подразделении", Deadline: "До 3 рабочих дней"}
@@ -254,13 +281,14 @@ func CalculateVisas(ctx DocumentContext) VisaCalculationResult {
 	} else if ctx.Kind == KindDirective {
 		// Directives
 		if strings.Contains(normTitle, "материальн") || strings.Contains(normTitle, "выплат") || strings.Contains(normTitle, "помощ") {
-			matched = append(matched, StandardMatrix[4]) // Row 5
+			matched = append(matched, rowByNumber(5))
 			deptMap[DeptHR] = VisaRequirement{Department: DeptHR, Required: true, Reason: "Строка 5 Матрицы: материальные выплаты работникам", Deadline: "До 3 рабочих дней"}
 		} else if strings.Contains(normTitle, "групп") || strings.Contains(normTitle, "комитет") || strings.Contains(normTitle, "комисс") ||
 			ctx.MatchedModuleID == "M-06" || ctx.MatchedModuleID == "M-07" {
-			matched = append(matched, StandardMatrix[5]) // Row 6
+			matched = append(matched, rowByNumber(6))
 			deptMap[DeptHR] = VisaRequirement{Department: DeptHR, Required: true, Reason: "Строка 6 Матрицы: согласование состава участников органа", Deadline: "До 3 рабочих дней"}
 			if ctx.IsITProject {
+				triggeredConditions[6] = true
 				deptMap[DeptIT] = VisaRequirement{
 					Department: DeptIT,
 					Required:   true,
@@ -269,8 +297,8 @@ func CalculateVisas(ctx DocumentContext) VisaCalculationResult {
 				}
 			}
 		} else {
-			// Other directives (Row 7)
-			matched = append(matched, StandardMatrix[6])
+			// Прочие распоряжения
+			matched = append(matched, rowByNumber(7))
 			deptMap[DeptLegal] = VisaRequirement{Department: DeptLegal, Required: true, Reason: "Строка 7 Матрицы: прочие распоряжения", Deadline: "До 3 рабочих дней"}
 		}
 	} else {
@@ -294,14 +322,7 @@ func CalculateVisas(ctx DocumentContext) VisaCalculationResult {
 		if row.Condition != "" {
 			// The condition is either triggered (visa present) or not — reflect
 			// the evaluated state explicitly.
-			triggered := false
-			for _, v := range deptMap {
-				if v.Reason != "" && strings.Contains(v.Reason, fmt.Sprintf("Строки %d", row.RowNumber)) && v.Required {
-					triggered = true
-					break
-				}
-			}
-			if triggered {
+			if triggeredConditions[row.RowNumber] {
 				res.AppliedRules = append(res.AppliedRules,
 					fmt.Sprintf("Особое условие Строки %d выполнено: %s — виза включена в маршрут.", row.RowNumber, row.Condition))
 			} else {
@@ -377,6 +398,7 @@ func CalculateVisas(ctx DocumentContext) VisaCalculationResult {
 	}
 	return res
 }
+
 func formatDeptsSummary(visas []VisaRequirement) string {
 	var depts []string
 	for _, v := range visas {

@@ -75,6 +75,12 @@ INF SancireAI Backend listening successfully addr=:8080
 
 Проверка: `curl http://localhost:8080/api/health` → JSON с текущими адресами Ollama/Qdrant.
 
+Полезные эндпоинты для диагностики:
+
+* `GET /api/health` — адреса Ollama/Qdrant и версия сервиса;
+* `GET /api/modules` — каталог модульных документов (форма конструктора строится из него, поэтому фронтенд и генератор `.docx` не могут разойтись);
+* `GET /api/admin/stats` (роль `DOU_Admin`) — живые цифры для панели администратора: число фрагментов в локальном индексе, состояние коллекции Qdrant (`points`, `dimension`), модели Ollama и количество регламентов по статусам.
+
 ### Переменные окружения (все опциональны — дефолты подобраны под локальный стек)
 
 | Переменная | Дефолт | Назначение |
@@ -87,10 +93,12 @@ INF SancireAI Backend listening successfully addr=:8080
 | `SANCIRE_QDRANT_COLLECTION` | `dou_knowledge` | коллекция векторов |
 | `SANCIRE_MIN_SCORE` | `0.45` | порог схожести векторного поиска |
 | `SANCIRE_DATA_DIR` | `./data` | файлы (загруженные регламенты, артефакты) |
-| `SANCIRE_DB_PATH` | `./data/sancire.db` | SQLite |
+| `SANCIRE_DB_PATH` | `<SANCIRE_DATA_DIR>/sancire.db` | SQLite; по умолчанию выводится из `SANCIRE_DATA_DIR` |
 | `SANCIRE_TEMPLATES_DIR` | `./templates` | бинарные шаблоны `.docx` (не редактировать!) |
-| `SANCIRE_CORPUS_DIR` | `./corpus` | корпус знаний (`all_chunks.json`, `documents.json`, `modules.json`) |
+| `SANCIRE_CORPUS_DIR` | `./corpus` | корпус знаний (`all_chunks.json`, `documents.json`) |
 | `SANCIRE_JWT_SECRET` | генерируется | **рекомендуется задать** постоянный ключ, иначе сессии слетают при перезапуске |
+| `SANCIRE_TOKEN_TTL` | `24h` | время жизни JWT (формат Go duration: `30m`, `12h`, `72h`) |
+| `SANCIRE_CORS_ORIGINS` | `http://localhost:3000`, `:5173` | origins через запятую, которым разрешены credentialed-запросы |
 
 Пример с заданием секрета (PowerShell):
 

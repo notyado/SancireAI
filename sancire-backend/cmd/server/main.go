@@ -1,31 +1,49 @@
+// Command server starts the SancireAI HTTP service: SQLite store, RAG engine
+// (Qdrant + Ollama) and the API router. Shutdown is graceful on SIGINT/SIGTERM.
 package main
+
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+
 	"sancireai/backend/internal/api"
 	"sancireai/backend/internal/config"
 	"sancireai/backend/internal/rag"
 	"sancireai/backend/internal/store"
 )
+
+// Server timeouts. Reads and writes are generous because document generation
+// and SSE answers are long-lived by design.
+const (
+	readTimeout     = 300 * time.Second
+	writeTimeout    = 600 * time.Second
+	idleTimeout     = 300 * time.Second
+	shutdownTimeout = 10 * time.Second
+)
+
 func main() {
-	// Setup structured console logger
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339})
+
 	cfg := config.Load()
-	log.Info().Str("addr", cfg.Addr).Msg("Starting SancireAI Backend Service...")
-	// Initialize SQLite Store
+
 	dbStore, err := store.New(cfg.DBPath)
 	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to initialize database store")
+		log.Fatal().Err(err).Str("db", cfg.DBPath).Msg("failed to initialize the database store")
 	}
-	defer dbStore.Close()
-	log.Info().Str("db", cfg.DBPath).Msg("SQLite Store initialized")
-	// Initialize RAG Engine
+	defer func() {
+		if err := dbStore.Close(); err != nil {
+			log.Error().Err(err).Msg("database close failed")
+		}
+	}()
+
 	ragEngine := rag.NewEngine(rag.EngineConfig{
 		QdrantURL:         cfg.QdrantURL,
 		Collection:        cfg.QdrantCollection,
@@ -34,32 +52,45 @@ func main() {
 		EmbedModel:        cfg.EmbedModel,
 		MinRelevanceScore: cfg.MinRelevanceScore,
 	})
-	log.Info().Str("qdrant", cfg.QdrantURL).Str("ollama", cfg.OllamaURL).Msg("RAG Engine ready")
-	// Setup Router & Handlers
-	handler := api.NewHandler(cfg, dbStore, ragEngine)
-	router := api.SetupRouter(handler)
+
 	server := &http.Server{
 		Addr:         cfg.Addr,
-		Handler:      router,
-		ReadTimeout:  300 * time.Second,
-		WriteTimeout: 600 * time.Second,
-		IdleTimeout:  300 * time.Second,
+		Handler:      api.SetupRouter(api.NewHandler(cfg, dbStore, ragEngine)),
+		ReadTimeout:  readTimeout,
+		WriteTimeout: writeTimeout,
+		IdleTimeout:  idleTimeout,
 	}
-	// Graceful shutdown channel
-	stopChan := make(chan os.Signal, 1)
-	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
+
+	// A listen error must not be reported with log.Fatal from the serving
+	// goroutine: it would skip the deferred cleanup and race the shutdown path.
+	errChan := make(chan error, 1)
 	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatal().Err(err).Msg("Server failed to listen")
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errChan <- err
 		}
 	}()
-	log.Info().Str("addr", cfg.Addr).Msg("SancireAI Backend listening successfully")
-	<-stopChan
-	log.Info().Msg("Shutting down SancireAI server...")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+
+	stopChan := make(chan os.Signal, 1)
+	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
+
+	log.Info().
+		Str("addr", cfg.Addr).
+		Str("db", cfg.DBPath).
+		Str("qdrant", cfg.QdrantURL).
+		Str("ollama", cfg.OllamaURL).
+		Msg("SancireAI backend is listening")
+
+	select {
+	case err := <-errChan:
+		log.Fatal().Err(err).Msg("server failed to listen")
+	case <-stopChan:
+		log.Info().Msg("shutdown signal received")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil {
-		log.Error().Err(err).Msg("Server shutdown error")
+		log.Error().Err(err).Msg("server shutdown error")
 	}
-	log.Info().Msg("Server stopped gracefully")
+	log.Info().Msg("server stopped gracefully")
 }

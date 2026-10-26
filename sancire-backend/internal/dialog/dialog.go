@@ -30,12 +30,11 @@ type File struct {
 
 // Request is one inbound chat turn.
 type Request struct {
-	Ctx    context.Context
-	Text   string
-	Action string
-	Files  []File
-	Draft  any
-	Token  func(string)
+	Ctx   context.Context
+	Text  string
+	Files []File
+	Draft any
+	Token func(string)
 }
 
 // ArtifactOut is a generated file that the handler must persist as an artifact.
@@ -59,15 +58,15 @@ type Outcome struct {
 
 // Meta mirrors the JSON metadata attached to assistant messages.
 type Meta struct {
-	Intent    string         `json:"intent,omitempty"`
-	Sources   []Source       `json:"sources,omitempty"`
-	Process   *Process       `json:"process,omitempty"`
-	Document  *DocumentCard  `json:"document,omitempty"`
-	Wizard    *WizardMeta    `json:"wizard,omitempty"`
-	Audit     *docx.AuditReport `json:"audit,omitempty"`
-	NotFound  bool           `json:"notFound,omitempty"`
-	Clarifying bool          `json:"clarifying,omitempty"`
-	FollowUps []string       `json:"followUps,omitempty"`
+	Intent     string            `json:"intent,omitempty"`
+	Sources    []Source          `json:"sources,omitempty"`
+	Process    *Process          `json:"process,omitempty"`
+	Document   *DocumentCard     `json:"document,omitempty"`
+	Wizard     *WizardMeta       `json:"wizard,omitempty"`
+	Audit      *docx.AuditReport `json:"audit,omitempty"`
+	NotFound   bool              `json:"notFound,omitempty"`
+	Clarifying bool              `json:"clarifying,omitempty"`
+	FollowUps  []string          `json:"followUps,omitempty"`
 }
 
 // Source points at a normative document section.
@@ -151,8 +150,10 @@ var (
 	reTimeQ        = regexp.MustCompile(`(?i)(которы[йя]\s+час|сколько\s+времени|текуще[ея]\s+время|сколько\s+часов\s+сейчас)`)
 )
 
-var ruMonths = [...]string{"января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"}
-var ruWeekdays = [...]string{"понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"}
+var (
+	ruMonths   = [...]string{"января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"}
+	ruWeekdays = [...]string{"понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"}
+)
 
 // answerDateOrTime handles deterministic calendar/clock questions so they
 // never reach the knowledge base (where they used to match random clauses).
@@ -176,22 +177,26 @@ func answerDateOrTime(e *Engine, req Request, norm string) (Outcome, bool) {
 }
 
 // Section exposes a knowledge chunk for the regulations reader endpoint.
-func (e *Engine) Section(id string) (chunkID, docTitle, clause, text, updatedAt string, ok bool) {
+func (e *Engine) Section(id string) (kb.Chunk, bool) {
 	if e.ix == nil {
-		return "", "", "", "", "", false
+		return kb.Chunk{}, false
 	}
-	c, found := e.ix.Get(id)
-	if !found {
-		return "", "", "", "", "", false
+	return e.ix.Get(id)
+}
+
+// CorpusSize reports how many knowledge chunks are currently indexed. It backs
+// the admin statistics endpoint and the help text.
+func (e *Engine) CorpusSize() int {
+	if e.ix == nil {
+		return 0
 	}
-	return c.ID, c.DocumentTitle, c.Clause, c.Text, c.UpdatedAt, true
+	return e.ix.Len()
 }
 
 // Respond processes one chat turn.
 func (e *Engine) Respond(req Request) Outcome {
 	text := strings.TrimSpace(req.Text)
-	norm := strings.ToLower(text)
-	norm = strings.ReplaceAll(norm, "ё", "е")
+	norm := normalizeText(text)
 
 	// 1. Audit whenever a .docx payload arrives.
 	if out, ok := e.tryAuditFiles(req, norm); ok {
@@ -270,7 +275,8 @@ func (e *Engine) reply(req Request, answer string, meta Meta) Outcome {
 	return Outcome{Answer: answer, Meta: meta}
 }
 
-// replyToken streams with the SSE callback when present.
+// emit streams an answer through the SSE callback in small chunks so the
+// frontend can render it progressively. It is a no-op without a callback.
 func emit(token func(string), text string) {
 	if token == nil || text == "" {
 		return
@@ -287,10 +293,6 @@ func emit(token func(string), text string) {
 			time.Sleep(8 * time.Millisecond)
 		}
 	}
-}
-
-func (e *Engine) stream(req Request, answer string, meta Meta) Outcome {
-	return e.reply(req, answer, meta)
 }
 
 // ---------------------------------------------------------------------------
@@ -311,7 +313,7 @@ func (e *Engine) tryAuditFiles(req Request, norm string) (Outcome, bool) {
 			return e.reply(req, fmt.Sprintf("Не удалось разобрать файл `%s`: %s\n\nПроверьте, что это корректный .docx.", f.Name, err.Error()), Meta{Intent: "audit.error", NotFound: true}), true
 		}
 		answer := auditAnswer(report)
-		return e.stream(req, answer, Meta{
+		return e.reply(req, answer, Meta{
 			Intent:    "audit.report",
 			Audit:     report,
 			FollowUps: auditFollowUps(report),
@@ -324,9 +326,26 @@ func (e *Engine) tryAuditFiles(req Request, norm string) (Outcome, bool) {
 // Intent helpers
 // ---------------------------------------------------------------------------
 
+// titleMatchBonus is the extra weight a full module title adds in detectModule.
+const titleMatchBonus = 3
+
+// Phrase lists are stored already normalised (lower-case, «е» instead of «ё»)
+// because incoming text goes through normalizeText before matching.
+var (
+	greetingPhrases  = []string{"привет", "здравствуй", "добрый день", "доброе утро", "добрый вечер", "салют", "хай", "доброго"}
+	helpPhrases      = []string{"что умеешь", "что ты умеешь", "что можешь", "помощь", "помоги", "возможности", "что делаешь", "как ты работаешь", "кто ты", "что ты такое"}
+	smallTalkPhrases = []string{"как дела", "как жизнь", "расскажи анекдот", "погода", "чем занимаешься", "как ты себя чувствуешь",
+		"это че", "че это", "я это что", "ты кто", "откуда ты", "как тебя зовут", "сколько тебе лет", "что новое"}
+)
+
+// normalizeText folds case and «ё» so phrase lists match user input.
+func normalizeText(s string) string {
+	return strings.ToLower(strings.ReplaceAll(s, "ё", "е"))
+}
+
 func isGreeting(s string) bool {
 	s = strings.TrimSpace(s)
-	for _, g := range []string{"привет", "здравствуй", "добрый день", "доброе утро", "добрый вечер", "салют", "хай", "доброго"} {
+	for _, g := range greetingPhrases {
 		if s == g || strings.HasPrefix(s, g+" ") || strings.HasPrefix(s, g+",") || strings.HasPrefix(s, g+"!") {
 			return true
 		}
@@ -335,16 +354,15 @@ func isGreeting(s string) bool {
 }
 
 func isHelp(s string) bool {
-	for _, p := range []string{"что умеешь", "что ты умеешь", "что можешь", "помощь", "помоги", "возможности", "что делаешь", "как ты работаешь", "кто ты", "что ты такое"} {
-		if strings.Contains(s, p) {
-			return true
-		}
-	}
-	return false
+	return containsAnyPhrase(s, helpPhrases)
 }
 
 func isSmallTalk(s string) bool {
-	for _, p := range []string{"как дела", "как жизнь", "расскажи анекдот", "погода", "чем занимаешься", "как ты себя чувствуешь", "это че", "че это", "чё это", "я это что", "ты кто", "откуда ты", "как тебя зовут", "сколько тебе лет", "что новое"} {
+	return containsAnyPhrase(normalizeText(s), smallTalkPhrases)
+}
+
+func containsAnyPhrase(s string, phrases []string) bool {
+	for _, p := range phrases {
 		if strings.Contains(s, p) {
 			return true
 		}
@@ -357,22 +375,20 @@ func detectModule(text, norm string) (string, bool) {
 	if m := reModuleCode.FindStringSubmatch(text); m != nil {
 		return "M-0" + m[1], true
 	}
-	norm = strings.ToLower(strings.ReplaceAll(norm, "ё", "е"))
 	bestID := ""
 	bestHits := 0
 	for _, id := range docx.ModuleIDs() {
-		mod, ok := docx.ModulesRegistry[id]
-		if !ok {
-			continue
-		}
+		mod := docx.ModulesRegistry[id]
 		hits := 0
 		for _, t := range mod.Triggers {
 			if strings.Contains(norm, t) {
 				hits++
 			}
 		}
-		if title := strings.ToLower(strings.ReplaceAll(mod.Title, "ё", "е")); title != "" && strings.Contains(norm, title) {
-			hits += 3
+		// A full module title in the request is a much stronger signal than a
+		// single trigger phrase.
+		if title := normalizeText(mod.Title); title != "" && strings.Contains(norm, title) {
+			hits += titleMatchBonus
 		}
 		if hits > bestHits {
 			bestHits = hits
@@ -440,14 +456,11 @@ func helpText(e *Engine) string {
 		"и выдам готовый .docx с сохранением регистрационной зоны и зоны визуализации ЭП.\n\n" +
 		"**3. Проверка проекта документа.** Загрузите .docx — найду незаполненные места, отклонения от эталона " +
 		"и рассчитаю полный маршрут визирования по Матрице с обоснованием.\n\n")
-	if e != nil && e.ix != nil && e.ix.Len() > 0 {
-		b.WriteString(fmt.Sprintf("База знаний: %d фрагментов нормативных документов.\n\n", e.ix.Len()))
+	if e != nil && e.CorpusSize() > 0 {
+		b.WriteString(fmt.Sprintf("База знаний: %d фрагментов нормативных документов.\n\n", e.CorpusSize()))
 	}
 	b.WriteString("Модули документов:")
-	for i, id := range docx.ModuleIDs() {
-		if i >= 7 {
-			break
-		}
+	for _, id := range docx.ModuleIDs() {
 		mod := docx.ModulesRegistry[id]
 		b.WriteString(fmt.Sprintf("\n- %s — %s", mod.Title, mod.Code))
 	}

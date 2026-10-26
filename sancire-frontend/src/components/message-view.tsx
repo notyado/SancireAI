@@ -1,9 +1,9 @@
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode, type ComponentProps } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { AuditReportFE, GeneratedDocument, MessageMeta, ProcessStep, SourceRef, WizardMeta } from "@/db/schema";
+import type { AuditReport, GeneratedDocument, MessageMeta, ProcessStep, SourceRef, WizardMeta } from "@/db/schema";
 import { IconAlert, IconCheck, IconCopy, IconDownload, IconInfo, IconShield } from "@/components/icons";
-import { getAuthToken } from "@/lib/chat-client";
+import { authHeader } from "@/lib/chat-client";
 import { useApp, type MessageRow } from "@/components/providers";
 
 function TypingIndicator() {
@@ -129,39 +129,33 @@ function DocumentCardView({
   onToast: (text: string) => void;
   onFollowUp: (text: string) => void;
 }) {
-  const [editing, setEditing] = useState(false);
-  const [body, setBody] = useState(document.body);
   const [busy, setBusy] = useState(false);
+
+  // The generated .docx lives on the server as an artifact; the card only
+  // carries its id, so there is nothing to edit or re-download locally.
   async function download() {
-    if (document.artifactId) {
-      setBusy(true);
-      try {
-        const headers: Record<string, string> = {};
-        const token = getAuthToken();
-        if (token) headers.Authorization = `Bearer ${token}`;
-        const response = await fetch(`/api/artifacts/${encodeURIComponent(document.artifactId)}`, { headers });
-        if (!response.ok) throw new Error(String(response.status));
-        const blob = await response.blob();
-        const url = URL.createObjectURL(blob);
-        const link = window.document.createElement("a");
-        link.href = url;
-        link.download = document.fileName || document.filename || `${document.title}.docx`;
-        link.click();
-        URL.revokeObjectURL(url);
-      } catch {
-        onToast("Не удалось скачать файл — попробуйте ещё раз");
-      } finally {
-        setBusy(false);
-      }
+    if (!document.artifactId) {
+      onToast("Файл не сохранён на сервере — сформируйте документ ещё раз");
       return;
     }
-    const blob = new Blob([body || ""], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = window.document.createElement("a");
-    link.href = url;
-    link.download = `${document.title}.txt`;
-    link.click();
-    URL.revokeObjectURL(url);
+    setBusy(true);
+    try {
+      const response = await fetch(`/api/artifacts/${encodeURIComponent(document.artifactId)}`, {
+        headers: authHeader(),
+      });
+      if (!response.ok) throw new Error(String(response.status));
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = window.document.createElement("a");
+      link.href = url;
+      link.download = document.fileName || `${document.title}.docx`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      onToast("Не удалось скачать файл — попробуйте ещё раз");
+    } finally {
+      setBusy(false);
+    }
   }
   return (
     <div className="doc-card">
@@ -173,51 +167,16 @@ function DocumentCardView({
       <div className="doc-card-actions">
         <button type="button" onClick={() => void download()} disabled={busy}>
           <span className="inline-flex items-center gap-2">
-            <IconDownload size={16} /> {busy ? "Готовлю файл…" : document.artifactId ? "Скачать .docx" : "Скачать"}
+            <IconDownload size={16} /> {busy ? "Готовлю файл…" : "Скачать .docx"}
           </span>
         </button>
-        {document.artifactId ? (
-          <button type="button" onClick={() => onFollowUp("Проверить готовый документ")}>
-            Проверить документ
-          </button>
-        ) : (
-          <button type="button" onClick={() => setEditing(true)}>
-            Редактировать
-          </button>
-        )}
-        {document.artifactId ? (
-          <button type="button" onClick={() => onFollowUp("Какой будет маршрут визирования?")}>
-            Маршрут визирования
-          </button>
-        ) : null}
+        <button type="button" onClick={() => onFollowUp("Проверить готовый документ")}>
+          Проверить документ
+        </button>
+        <button type="button" onClick={() => onFollowUp("Какой будет маршрут визирования?")}>
+          Маршрут визирования
+        </button>
       </div>
-      {editing ? (
-        <div className="modal-layer" onClick={() => setEditing(false)}>
-          <div className="modal-card" onClick={(event) => event.stopPropagation()}>
-            <h3 className="text-lg font-medium">{document.title}</h3>
-            <textarea
-              className="mt-4 min-h-[280px] w-full rounded-[18px] border border-[var(--divider)] bg-transparent p-4 outline-none"
-              value={body}
-              onChange={(event) => setBody(event.target.value)}
-            />
-            <div className="mt-4 flex justify-end gap-2">
-              <button type="button" className="pill" onClick={() => setEditing(false)}>
-                Закрыть
-              </button>
-              <button
-                type="button"
-                className="primary-btn solid px-4 py-2 text-sm"
-                onClick={() => {
-                  setEditing(false);
-                  onToast("Черновик обновлён");
-                }}
-              >
-                Сохранить
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
     </div>
   );
 }
@@ -255,7 +214,7 @@ function WizardProgressCard({ wizard }: { wizard: WizardMeta }) {
   );
 }
 
-function AuditCard({ audit }: { audit: AuditReportFE }) {
+function AuditCard({ audit }: { audit: AuditReport }) {
   const statusLabel =
     audit.status === "READY" ? "Готов к согласованию" : audit.status === "WARNINGS" ? "Есть предупреждения" : "Критические замечания";
   const visas = (audit.visaRouting?.requiredVisas || []).filter((visa) => visa.required);

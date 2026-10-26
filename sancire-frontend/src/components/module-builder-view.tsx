@@ -1,371 +1,55 @@
-"use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useApp } from "@/components/providers";
+import { jsonHeaders } from "@/lib/chat-client";
+import type { ModuleInfo } from "@/db/schema";
 import { IconCheck, IconDownload, IconShield } from "@/components/icons";
-type ModuleInfo = {
-  id: string;
-  code: string;
-  title: string;
-  category: string;
-  description: string;
-  fields: {
-    key: string;
-    label: string;
-    placeholder: string;
-    type: "text" | "date" | "choice" | "textarea";
-    required?: boolean;
-    options?: string[];
-    helperNote?: string;
-  }[];
-};
-const MODULES: ModuleInfo[] = [
-  {
-    id: "M-01",
-    code: "M-01",
-    title: "Приказ о вводе в эксплуатацию информационной системы",
-    category: "Информационные технологии",
-    description: "Ввод разработанной или модернизированной информационной системы в промышленную эксплуатацию Банка России.",
-    fields: [
-      {
-        key: "is_name",
-        label: "Наименование информационной системы",
-        placeholder: "Автоматизированная система мониторинга платежей (АС МП)",
-        type: "text",
-        required: true,
-        helperNote: "Вводится 1 раз и автоматически дублируется во всех 7 связанных пунктах приказа.",
-      },
-      {
-        key: "basis_doc",
-        label: "Документ-основание (решение/акт)",
-        placeholder: "акта готовности к вводу в эксплуатацию от 12.10.2026 № 45-ИТ",
-        type: "text",
-        required: true,
-      },
-      {
-        key: "modification_type",
-        label: "Характер разработки",
-        placeholder: "разработанного",
-        type: "choice",
-        options: ["разработанного", "измененного"],
-        required: true,
-        helperNote: "Невыбранный вариант будет удален из итогового текста (п. 3.3 Рекомендаций).",
-      },
-      {
-        key: "tz_requisites",
-        label: "Основание разработки (ТЗ/договор)",
-        placeholder: "Техническим заданием от 15.01.2026 № ТЗ-12",
-        type: "text",
-        required: true,
-      },
-      {
-        key: "start_date",
-        label: "Дата ввода в эксплуатацию",
-        placeholder: "01.11.2026",
-        type: "date",
-        required: true,
-      },
-      {
-        key: "customer_dept",
-        label: "Подразделение-заказчик",
-        placeholder: "Департаменту финансового мониторинга",
-        type: "text",
-        required: true,
-      },
-      {
-        key: "purpose",
-        label: "Целевое назначение системы",
-        placeholder: "автоматизация выявления подозрительных операций и формирование аналитической отчетности",
-        type: "textarea",
-        required: true,
-      },
-      {
-        key: "controller_person",
-        label: "Ответственный за контроль исполнения",
-        placeholder: "директора Департамента информационных технологий Иванова И.И.",
-        type: "text",
-        required: true,
-      },
-      {
-        key: "signatory",
-        label: "Подписант (должность и ФИО)",
-        placeholder: "Заместитель Председателя Банка России Петров П.П.",
-        type: "text",
-        required: true,
-      },
-    ],
-  },
-  {
-    id: "M-02",
-    code: "M-02",
-    title: "Приказ о назначении ответственных за делопроизводство",
-    category: "Делопроизводство",
-    description: "Назначение основного и замещающего работников за ведение делопроизводства и СЭД в подразделении.",
-    fields: [
-      {
-        key: "department",
-        label: "Структурное подразделение",
-        placeholder: "Департаменте бухгалтерского учета",
-        type: "text",
-        required: true,
-      },
-      {
-        key: "main_responsible",
-        label: "Основной ответственный (должность, ФИО)",
-        placeholder: "ведущего специалиста Смирнову Е.А.",
-        type: "text",
-        required: true,
-      },
-      {
-        key: "substitute_responsible",
-        label: "Замещающий на период отсутствия",
-        placeholder: "главного эксперта Ковалева В.С.",
-        type: "text",
-        required: true,
-      },
-      {
-        key: "signatory",
-        label: "Подписант",
-        placeholder: "Руководитель Службы текущего контроля Сидоров С.С.",
-        type: "text",
-        required: true,
-      },
-    ],
-  },
-  {
-    id: "M-03",
-    code: "M-03",
-    title: "Приказ о приеме и передаче дел и имущества",
-    category: "Кадры и имущество",
-    description: "Оформление передачи дел, документов, печатей и прав доступа к ИС при смене руководителя подразделения.",
-    fields: [
-      {
-        key: "reason",
-        label: "Основание издания приказа",
-        placeholder: "увольнением начальника Управления отчетности Васильева А.Н.",
-        type: "text",
-        required: true,
-      },
-      {
-        key: "handing_person",
-        label: "Сдающий дела (должность, ФИО)",
-        placeholder: "начальнику Управления Васильеву А.Н.",
-        type: "text",
-        required: true,
-      },
-      {
-        key: "receiving_person",
-        label: "Принимающий дела (должность, ФИО)",
-        placeholder: "заместителю начальника Управления Орлову Д.В.",
-        type: "text",
-        required: true,
-      },
-      {
-        key: "deadline",
-        label: "Срок завершения приема-передачи",
-        placeholder: "28.10.2026",
-        type: "date",
-        required: true,
-      },
-      {
-        key: "has_is_access",
-        label: "Передаются ли права доступа к ИС?",
-        placeholder: "да",
-        type: "choice",
-        options: ["Да (обязательна виза Департамента ИБ)", "Нет"],
-        required: true,
-        helperNote: "При выборе «Да» по Строке 2 Матрицы в маршрут согласования включается Департамент ИБ.",
-      },
-      {
-        key: "signatory",
-        label: "Подписант",
-        placeholder: "Председатель Организации",
-        type: "text",
-        required: true,
-      },
-    ],
-  },
-  {
-    id: "M-04",
-    code: "M-04",
-    title: "Приказ об утверждении локального нормативного акта",
-    category: "Нормотворчество",
-    description: "Введение в действие новых регламентов, порядков и положений Банка России.",
-    fields: [
-      {
-        key: "goal",
-        label: "Цель принятия акта",
-        placeholder: "совершенствования процедур операционного контроля",
-        type: "text",
-        required: true,
-      },
-      {
-        key: "act_name",
-        label: "Наименование утверждаемого документа",
-        placeholder: "Порядок проведения проверок операционной надежности",
-        type: "text",
-        required: true,
-      },
-      {
-        key: "effective_date",
-        label: "Дата вступления в силу",
-        placeholder: "01.11.2026",
-        type: "date",
-        required: true,
-      },
-      {
-        key: "signatory",
-        label: "Подписант",
-        placeholder: "Заместитель Председателя Организации",
-        type: "text",
-        required: true,
-      },
-    ],
-  },
-  {
-    id: "M-05",
-    code: "M-05",
-    title: "Распоряжение о проведении внутреннего аудита процессов",
-    category: "Внутренний контроль",
-    description: "Плановый или целевой аудит бизнес-процессов подразделения независимой группой аудиторов.",
-    fields: [
-      {
-        key: "process_name",
-        label: "Наименование проверяемого процесса",
-        placeholder: "Процесс управления рисками ликвидности",
-        type: "text",
-        required: true,
-      },
-      {
-        key: "audit_period",
-        label: "Период проведения аудита",
-        placeholder: "с 05.11.2026 по 20.11.2026",
-        type: "text",
-        required: true,
-      },
-      {
-        key: "audit_lead",
-        label: "Руководитель аудиторской группы",
-        placeholder: "главный аудитор Кузнецов М.И.",
-        type: "text",
-        required: true,
-      },
-      {
-        key: "auditors_team",
-        label: "Состав аудиторов",
-        placeholder: "ведущий аудитор Федорова А.П., эксперт Новиков С.К.",
-        type: "textarea",
-        required: true,
-        helperNote: "Аудиторы не должны являться работниками проверяемого подразделения.",
-      },
-      {
-        key: "signatory",
-        label: "Подписант",
-        placeholder: "Заместитель Председателя Организации",
-        type: "text",
-        required: true,
-      },
-    ],
-  },
-  {
-    id: "M-06",
-    code: "M-06",
-    title: "Распоряжение о создании проектного комитета",
-    category: "Проектное управление",
-    description: "Формирование коллегиального органа координации и контроля стратегического проекта.",
-    fields: [
-      {
-        key: "project_name",
-        label: "Наименование проекта",
-        placeholder: "Модернизация ядра межбанковских расчетов",
-        type: "text",
-        required: true,
-      },
-      {
-        key: "committee_chair",
-        label: "Председатель Комитета",
-        placeholder: "Заместитель Председателя Организации Григорьев А.А.",
-        type: "text",
-        required: true,
-      },
-      {
-        key: "is_it_project",
-        label: "Связан ли проект с ИТ или созданием ИС?",
-        placeholder: "да",
-        type: "choice",
-        options: ["Да (обязательна виза Департамента ИТ)", "Нет"],
-        required: true,
-        helperNote: "При выборе «Да» по Строке 6 Матрицы обязательна виза Департамента ИТ.",
-      },
-      {
-        key: "signatory",
-        label: "Подписант",
-        placeholder: "Заместитель Председателя Организации",
-        type: "text",
-        required: true,
-      },
-    ],
-  },
-  {
-    id: "M-07",
-    code: "M-07",
-    title: "Распоряжение о создании рабочей группы",
-    category: "Организационные вопросы",
-    description: "Формирование временного межфункционального коллектива для решения оперативной задачи.",
-    fields: [
-      {
-        key: "group_goal",
-        label: "Практическая цель создания группы",
-        placeholder: "подготовка предложений по внедрению искусственного интеллекта в ДОУ",
-        type: "textarea",
-        required: true,
-      },
-      {
-        key: "lead_name",
-        label: "Руководитель рабочей группы",
-        placeholder: "начальник Управления инноваций Белов К.Ю.",
-        type: "text",
-        required: true,
-      },
-      {
-        key: "is_it_project",
-        label: "Создается ли группа для ИТ-проекта или вопросов ИС?",
-        placeholder: "да",
-        type: "choice",
-        options: ["Да (обязательна виза Департамента ИТ)", "Нет"],
-        required: true,
-        helperNote: "При выборе «Да» по Строке 6 Матрицы обязательна виза Департамента ИТ.",
-      },
-      {
-        key: "deadline",
-        label: "Срок предоставления предложений",
-        placeholder: "15.12.2026",
-        type: "date",
-        required: true,
-      },
-      {
-        key: "signatory",
-        label: "Подписант",
-        placeholder: "Заместитель Председателя Организации",
-        type: "text",
-        required: true,
-      },
-    ],
-  },
-];
+
+/** Choice fields start pre-selected, so the very first «Сформировать» click
+ * cannot fail on a required option the user never touched. */
+function defaultValues(mod: ModuleInfo): Record<string, string> {
+  const defaults: Record<string, string> = {};
+  mod.fields.forEach((f) => {
+    if (f.type === "choice" && f.options?.length) defaults[f.key] = f.options[0];
+  });
+  return defaults;
+}
+
+/** Reads a download name from Content-Disposition, both the plain
+ * `filename="…"` and the RFC 5987 `filename*=UTF-8''…` form the backend sends. */
+function filenameFromDisposition(disposition: string | null, fallback: string): string {
+  if (!disposition) return fallback;
+  const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
+  if (utf8?.[1]) {
+    try {
+      return decodeURIComponent(utf8[1]);
+    } catch {
+      // A malformed escape falls back to the plain form below.
+    }
+  }
+  const plain = /filename="?([^";]+)"?/i.exec(disposition);
+  return plain?.[1]?.trim() || fallback;
+}
+
 export function ModuleBuilderView() {
-  const { showToast } = useApp();
-  const [selectedModule, setSelectedModule] = useState<ModuleInfo | null>(MODULES[0]);
+  const { showToast, modules: catalog } = useApp();
+  // The catalogue is served by the generator registry (GET /api/modules) and
+  // loaded once in the app context: the form always shows exactly the fields
+  // the backend validates and substitutes.
+  const modules = catalog ?? [];
+  const loading = catalog === null;
+  const [selectedModule, setSelectedModule] = useState<ModuleInfo | null>(null);
   const [formValues, setFormValues] = useState<Record<string, string>>({});
   const [generating, setGenerating] = useState(false);
+
+  useEffect(() => {
+    if (modules.length === 0 || selectedModule) return;
+    setSelectedModule(modules[0]);
+    setFormValues(defaultValues(modules[0]));
+  }, [modules, selectedModule]);
+
   function handleSelectModule(mod: ModuleInfo) {
     setSelectedModule(mod);
-    const defaults: Record<string, string> = {};
-    mod.fields.forEach((f) => {
-      if (f.type === "choice" && f.options) {
-        defaults[f.key] = f.options[0];
-      }
-    });
-    setFormValues(defaults);
+    setFormValues(defaultValues(mod));
   }
   function handleFieldChange(key: string, value: string) {
     setFormValues((prev) => ({ ...prev, [key]: value }));
@@ -376,11 +60,8 @@ export function ModuleBuilderView() {
     try {
       const res = await fetch("/api/documents/generate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          moduleId: selectedModule.id,
-          values: formValues,
-        }),
+        headers: jsonHeaders(),
+        body: JSON.stringify({ moduleId: selectedModule.id, values: formValues }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -388,12 +69,10 @@ export function ModuleBuilderView() {
         return;
       }
       const blob = await res.blob();
-      const disposition = res.headers.get("Content-Disposition");
-      let filename = `${selectedModule.code}_проект.docx`;
-      if (disposition) {
-        const match = disposition.match(/filename="?([^"]+)"?/);
-        if (match && match[1]) filename = match[1];
-      }
+      const filename = filenameFromDisposition(
+        res.headers.get("Content-Disposition"),
+        `${selectedModule.code}_проект.docx`,
+      );
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
@@ -403,7 +82,7 @@ export function ModuleBuilderView() {
       document.body.removeChild(link);
       window.URL.revokeObjectURL(url);
       showToast("Файл DOCX сформирован и очищен по Методическим рекомендациям");
-    } catch (e) {
+    } catch {
       showToast("Ошибка сети при скачивании файла");
     } finally {
       setGenerating(false);
@@ -417,7 +96,7 @@ export function ModuleBuilderView() {
           Конструктор документов
         </span>
         <h1 className="text-[30px] font-medium leading-tight tracking-[-0.03em] md:text-[38px]">
-          7 типовых модулей Банка России
+          {modules.length ? `${modules.length} типовых модулей Банка России` : "Типовые модули Банка России"}
         </h1>
         <p className="max-w-2xl text-[14.5px] leading-relaxed text-[var(--text-secondary)]">
           Выберите модуль и заполните параметры проекта. Система выполнит подстановку,
@@ -433,7 +112,17 @@ export function ModuleBuilderView() {
             Шаг 1 — выбор модуля
           </div>
           <div className="flex flex-col gap-2.5">
-            {MODULES.map((mod) => {
+            {loading ? (
+              <p className="rounded-2xl border border-[var(--divider)] bg-[var(--surface)] p-4 text-[13px] text-[var(--text-secondary)]">
+                Загрузка каталога модулей…
+              </p>
+            ) : null}
+            {!loading && modules.length === 0 ? (
+              <p className="rounded-2xl border border-[var(--divider)] bg-[var(--surface)] p-4 text-[13px] text-[var(--text-secondary)]">
+                Каталог модулей недоступен — проверьте, что бэкенд отвечает на <code>/api/modules</code>.
+              </p>
+            ) : null}
+            {modules.map((mod) => {
               const active = selectedModule?.id === mod.id;
               return (
                 <button

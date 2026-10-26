@@ -69,7 +69,9 @@ func grifBlock() tmplBlock {
 	}
 }
 
-func stampBlock(kindWord string) tmplBlock {
+// stampBlock renders the service "МОДУЛЬНЫЙ ДОКУМЕНТ" stamp. It carries no
+// module-specific wording and is dropped at generation time.
+func stampBlock() tmplBlock {
 	return tmplBlock{
 		Kind: "stamp",
 		Paras: []tmplPara{
@@ -116,7 +118,7 @@ func notesBlock(lines ...string) tmplBlock {
 func m01Blocks() []tmplBlock {
 	return []tmplBlock{
 		grifBlock(),
-		stampBlock("ПРИКАЗ"),
+		stampBlock(),
 		headBlock("ПРИКАЗ"),
 		{
 			Kind: "body",
@@ -152,7 +154,7 @@ func m01Blocks() []tmplBlock {
 func m02Blocks() []tmplBlock {
 	return []tmplBlock{
 		grifBlock(),
-		stampBlock("ПРИКАЗ"),
+		stampBlock(),
 		headBlock("ПРИКАЗ"),
 		{
 			Kind: "body",
@@ -197,7 +199,7 @@ func m02Blocks() []tmplBlock {
 func m03Blocks() []tmplBlock {
 	return []tmplBlock{
 		grifBlock(),
-		stampBlock("ПРИКАЗ"),
+		stampBlock(),
 		headBlock("ПРИКАЗ"),
 		{
 			Kind: "body",
@@ -229,7 +231,7 @@ func m03Blocks() []tmplBlock {
 func m04Blocks() []tmplBlock {
 	return []tmplBlock{
 		grifBlock(),
-		stampBlock("ПРИКАЗ"),
+		stampBlock(),
 		headBlock("ПРИКАЗ"),
 		{
 			Kind: "body",
@@ -245,9 +247,10 @@ func m04Blocks() []tmplBlock {
 		},
 		signEPBlock(),
 		notesBlock(
-			"1. Цель. Укажите причину принятия документа: регулирование процесса, распределение полномочий или приведение локальных актов в соответствие.",
-			"2. Утверждаемый документ. Укажите вид и полное наименование положения, правил, регламента, инструкции или порядка; наименование в заголовке, пункте 1 и приложении должно совпадать.",
-			"3. Дата введения. Укажите дату начала применения; при необходимости предусмотрите переходный период.",
+			"1. Наименование в заголовке. Укажите вид и полное наименование положения, правил, регламента, инструкции или порядка.",
+			"2. Цель. Укажите причину принятия документа: регулирование процесса, распределение полномочий или приведение локальных актов в соответствие.",
+			"3. Наименование в пункте 1. Должно полностью совпадать с заголовком приказа и с наименованием утверждаемого документа в приложении.",
+			"4. Дата введения. Укажите дату начала применения; при необходимости предусмотрите переходный период.",
 			"Общие правила: не оставляйте в подписываемом приказе квадратные скобки, линии и номера примечаний.",
 		),
 	}
@@ -260,7 +263,7 @@ func m04Blocks() []tmplBlock {
 func m05Blocks() []tmplBlock {
 	return []tmplBlock{
 		grifBlock(),
-		stampBlock("РАСПОРЯЖЕНИЕ"),
+		stampBlock(),
 		headBlock("РАСПОРЯЖЕНИЕ"),
 		{
 			Kind: "body",
@@ -308,7 +311,7 @@ func m05Blocks() []tmplBlock {
 func m06Blocks() []tmplBlock {
 	return []tmplBlock{
 		grifBlock(),
-		stampBlock("РАСПОРЯЖЕНИЕ"),
+		stampBlock(),
 		headBlock("РАСПОРЯЖЕНИЕ"),
 		{
 			Kind: "body",
@@ -350,7 +353,7 @@ func m06Blocks() []tmplBlock {
 func m07Blocks() []tmplBlock {
 	return []tmplBlock{
 		grifBlock(),
-		stampBlock("РАСПОРЯЖЕНИЕ"),
+		stampBlock(),
 		headBlock("РАСПОРЯЖЕНИЕ"),
 		{
 			Kind: "body",
@@ -401,12 +404,12 @@ func escText(s string) string {
 }
 
 type paraFmt struct {
-	align   string
-	size    string
-	bold    bool
-	before  string
-	after   string
-	indent  bool
+	align    string
+	size     string
+	bold     bool
+	before   string
+	after    string
+	indent   bool
 	keepNext bool
 }
 
@@ -524,7 +527,9 @@ func BuildTemplateDocumentXML(moduleID string) ([]byte, error) {
 	return []byte(b.String()), nil
 }
 
-// TemplateTokens returns every {{key}} token used by the module template.
+// TemplateTokens returns every field token ({{key}}) used by the module
+// template. Control tokens ({{when key=value}} / {{/when}}) contribute only
+// the field key they test.
 func TemplateTokens(moduleID string) map[string]bool {
 	tokens := make(map[string]bool)
 	for _, blk := range moduleBlocks(moduleID) {
@@ -546,6 +551,25 @@ func TemplateTokens(moduleID string) map[string]bool {
 	return tokens
 }
 
+// tokenKey maps one {{…}} body to the field keys it references: a plain token
+// yields its key, a {{when key=value}} condition yields the tested key and the
+// closing {{/when}} yields nothing.
+func tokenKey(tok string) []string {
+	tok = strings.TrimSpace(tok)
+	switch {
+	case tok == "" || strings.HasPrefix(tok, "/"):
+		return nil
+	case strings.HasPrefix(tok, "when "):
+		cond := strings.TrimSpace(strings.TrimPrefix(tok, "when "))
+		if eq := strings.Index(cond, "="); eq > 0 {
+			return []string{strings.TrimSpace(cond[:eq])}
+		}
+		return nil
+	default:
+		return []string{tok}
+	}
+}
+
 func extractTokens(s string) []string {
 	var out []string
 	rest := s
@@ -558,10 +582,7 @@ func extractTokens(s string) []string {
 		if j < 0 {
 			break
 		}
-		tok := rest[i+2 : i+j]
-		if tok != "" {
-			out = append(out, tok)
-		}
+		out = append(out, tokenKey(rest[i+2:i+j])...)
 		rest = rest[i+j+2:]
 	}
 	return out

@@ -1,65 +1,29 @@
-"use client";
 import { useState, type DragEvent } from "react";
 import { useApp } from "@/components/providers";
+import { authHeader, MAX_DOCX_BYTES } from "@/lib/chat-client";
+import type { AuditReport } from "@/db/schema";
 import { IconPaperclip, IconX } from "@/components/icons";
-type VisaRequirement = {
-  department: string;
-  required: boolean;
-  reason: string;
-  deadline: string;
-};
-type RouteStep = {
-  order: number;
-  stage: string;
-  actor: string;
-  description: string;
-  deadline: string;
-};
-type AuditFinding = {
-  id: string;
-  severity: "CRITICAL" | "WARNING" | "INFO";
-  title: string;
-  description: string;
-  location?: string;
-  ruleCitation: string;
-  recommendation: string;
-};
-type AuditReport = {
-  fileName: string;
-  fileSize: number;
-  status: "READY" | "WARNINGS" | "CRITICAL";
-  statusSummary: string;
-  detectedKind: string;
-  detectedModule?: string;
-  matchedModuleID?: string;
-  totalFindings: number;
-  criticalCount: number;
-  warningCount: number;
-  infoCount: number;
-  findings: AuditFinding[];
-  visaRouting: {
-    kind: string;
-    matchedRows: any[];
-    requiredVisas: VisaRequirement[];
-    routeSteps: RouteStep[];
-    modulePrivilege: boolean;
-    privilegeWarning?: string;
-    normativeBasis: string;
-  };
-};
+
 export function AuditView() {
   const { showToast } = useApp();
   const [file, setFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
   const [loading, setLoading] = useState(false);
   const [report, setReport] = useState<AuditReport | null>(null);
+
+  // The report shape mirrors docx.AuditReport: every collection is optional,
+  // so the cards below render from these defaults.
+  const routing = report?.visaRouting;
+  const findings = report?.findings ?? [];
+  const requiredVisas = routing?.requiredVisas ?? [];
+  const routeSteps = routing?.routeSteps ?? [];
   async function handleFileSelect(selected: File) {
     if (!selected.name.toLowerCase().endsWith(".docx")) {
       showToast("Поддерживаются только файлы формата .docx");
       return;
     }
-    if (selected.size > 15 * 1024 * 1024) {
-      showToast("Размер файла превышает 15 МБ");
+    if (selected.size > MAX_DOCX_BYTES) {
+      showToast(`Размер файла превышает ${Math.round(MAX_DOCX_BYTES / (1024 * 1024))} МБ`);
       return;
     }
     setFile(selected);
@@ -69,6 +33,8 @@ export function AuditView() {
     try {
       const res = await fetch("/api/documents/audit", {
         method: "POST",
+        // No Content-Type here: the browser sets the multipart boundary itself.
+        headers: authHeader(),
         body: formData,
       });
       if (!res.ok) {
@@ -79,7 +45,7 @@ export function AuditView() {
       const data = (await res.json()) as AuditReport;
       setReport(data);
       showToast("Аудит документа успешно завершен");
-    } catch (e) {
+    } catch {
       showToast("Ошибка сети при отправке файла");
     } finally {
       setLoading(false);
@@ -203,11 +169,11 @@ export function AuditView() {
                 <span>Предупреждений: <strong className="text-amber-400">{report.warningCount}</strong></span>
               </div>
             </div>
-            {report.visaRouting.privilegeWarning && (
+            {routing?.privilegeWarning ? (
               <div className="max-w-md p-4 rounded-2xl bg-amber-500/15 border border-amber-500/30 text-[12.5px] leading-relaxed text-amber-200">
-                {report.visaRouting.privilegeWarning}
+                {routing.privilegeWarning}
               </div>
-            )}
+            ) : null}
           </div>
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
             {/* Findings List (7 cols) */}
@@ -216,13 +182,13 @@ export function AuditView() {
                 <h3 className="text-[18px] font-medium">Замечания аудитора ({report.totalFindings})</h3>
                 <span className="text-[12.5px] text-[var(--text-secondary)]">Инструкция по ДОУ & Рекомендации</span>
               </div>
-              {report.findings.length === 0 ? (
+              {findings.length === 0 ? (
                 <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/5 p-6 text-center text-sm text-emerald-300">
                   Замечаний не обнаружено. Все реквизиты, даты, формулировки и зоны ЭП оформлены корректно.
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {report.findings.map((f) => (
+                  {findings.map((f) => (
                     <div
                       key={f.id}
                       className="rounded-2xl border border-[var(--divider)] bg-[var(--surface)] p-5 space-y-3"
@@ -273,7 +239,7 @@ export function AuditView() {
                   Обязательные визирующие подразделения:
                 </div>
                 <div className="divide-y divide-[var(--divider)]">
-                  {report.visaRouting.requiredVisas.map((v) => (
+                  {requiredVisas.map((v) => (
                     <div key={v.department} className="p-4 space-y-1">
                       <div className="flex items-center justify-between">
                         <span className="font-medium text-[14px]">{v.department}</span>
@@ -293,7 +259,7 @@ export function AuditView() {
                   Последовательность этапов (Глава 10 Инструкции):
                 </div>
                 <div className="space-y-3 pt-1">
-                  {report.visaRouting.routeSteps.map((step) => (
+                  {routeSteps.map((step) => (
                     <div key={step.order} className="flex gap-3 text-[13px]">
                       <span className="w-5 h-5 rounded-full bg-[var(--divider)] flex items-center justify-center text-[11px] font-mono shrink-0">
                         {step.order}

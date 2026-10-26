@@ -1,7 +1,7 @@
-"use client";
 import { useEffect, useRef, useState, type DragEvent, type FormEvent } from "react";
 import { IconMic, IconPaperclip, IconSend, IconStop, IconX } from "@/components/icons";
 import { useApp } from "@/components/providers";
+import { MAX_DOCX_BYTES } from "@/lib/chat-client";
 export type ComposerFile = {
   name: string;
   size: number;
@@ -38,7 +38,7 @@ export function Composer({
   onSubmit,
 }: Props) {
   const [text, setText] = useState("");
-  const [files, setFiles] = useState<(ComposerFile & { progress: number; done: boolean; raw?: File })[]>([]);
+  const [files, setFiles] = useState<(ComposerFile & { raw?: File })[]>([]);
   const [focus, setFocus] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [sending, setSending] = useState(false);
@@ -51,30 +51,16 @@ export function Composer({
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
   }, [text]);
+  // Attachments are read into base64 only when the message is sent, so a chip
+  // is added as-is: no upload starts here and none has to be simulated.
   function addFiles(list: FileList | File[]) {
     const incoming = Array.from(list).map((file) => ({
       name: file.name,
       size: file.size,
       type: file.type,
-      progress: 18,
-      done: false,
       raw: file,
     }));
     setFiles((prev) => [...prev, ...incoming]);
-    incoming.forEach((file) => {
-      const started = Date.now();
-      const tick = window.setInterval(() => {
-        const progress = Math.min(100, ((Date.now() - started) / 700) * 100);
-        setFiles((prev) =>
-          prev.map((item) =>
-            item.name === file.name && !item.done
-              ? { ...item, progress, done: progress >= 100 }
-              : item,
-          ),
-        );
-        if (progress >= 100) window.clearInterval(tick);
-      }, 40);
-    });
   }
   function toggleVoice() {
     showToast("Голосовой ввод пока в разработке — пользуйтесь клавиатурой");
@@ -89,7 +75,7 @@ export function Composer({
       const outgoing: ComposerFile[] = [];
       for (const { name, size, type, raw } of files) {
         const entry: ComposerFile = { name, size, type };
-        if (raw && name.toLowerCase().endsWith(".docx") && size <= 15 * 1024 * 1024) {
+        if (raw && name.toLowerCase().endsWith(".docx") && size <= MAX_DOCX_BYTES) {
           try {
             entry.data = await readAsBase64(raw);
           } catch {
@@ -129,24 +115,8 @@ export function Composer({
         <div className="mb-2 flex gap-2 overflow-x-auto px-1 pt-1">
           {files.map((file) => (
             <div key={file.name} className="file-chip group relative shrink-0">
-              <span className="relative grid h-8 w-8 place-items-center">
-                <svg viewBox="0 0 32 32" className="h-8 w-8 -rotate-90">
-                  <circle cx="16" cy="16" r="12" stroke="var(--divider)" strokeWidth="2.5" fill="none" />
-                  <circle
-                    cx="16"
-                    cy="16"
-                    r="12"
-                    stroke="var(--accent)"
-                    strokeWidth="2.5"
-                    fill="none"
-                    strokeDasharray={`${2 * Math.PI * 12}`}
-                    strokeDashoffset={`${2 * Math.PI * 12 * (1 - file.progress / 100)}`}
-                    strokeLinecap="round"
-                  />
-                </svg>
-                {file.done ? (
-                  <span className="absolute text-[11px] text-[var(--accent)]">✓</span>
-                ) : null}
+              <span className="grid h-8 w-8 place-items-center rounded-full border border-[var(--divider)] text-[12px] text-[var(--accent)]">
+                ✓
               </span>
               <span className="max-w-[140px] truncate">{file.name}</span>
               <button

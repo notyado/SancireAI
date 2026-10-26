@@ -1,7 +1,7 @@
-"use client";
 import { useState } from "react";
 import { useApp } from "@/components/providers";
 import { IconX } from "@/components/icons";
+import { roleLabel } from "@/lib/chat-client";
 export function AuthModal() {
   const { authModalOpen, setAuthModalOpen, login, user, logout } = useApp();
   const [username, setUsername] = useState("");
@@ -15,8 +15,8 @@ export function AuthModal() {
     try {
       await login(u, p);
       setAuthModalOpen(false);
-    } catch (err: any) {
-      setError(err?.message || "Ошибка авторизации");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Ошибка авторизации");
     } finally {
       setLoading(false);
     }
@@ -44,7 +44,7 @@ export function AuthModal() {
               <span className="text-[12px] uppercase text-[var(--text-secondary)] tracking-wider">Вы вошли как:</span>
               <span className="font-medium text-[16px]">{user.name}</span>
               <span className="text-[13px] text-[var(--text-secondary)]">
-                Роль: <strong className="text-white">{user.role === "DOU_Admin" ? "Администратор ДОУ" : "Сотрудник"}</strong> (@{user.username})
+                Роль: <strong className="text-white">{roleLabel(user.role)}</strong> (@{user.username})
               </span>
             </div>
             <button
@@ -96,7 +96,7 @@ export function AuthModal() {
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                handleLogin(username, password);
+                void handleLogin(username, password);
               }}
               className="space-y-3"
             >

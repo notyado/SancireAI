@@ -1,35 +1,52 @@
 package api
 
 import (
+	"net/http"
+	"time"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
-	"net/http"
+
+	"sancireai/backend/internal/config"
 )
 
+// corsMaxAge is how long a browser may cache a preflight answer.
+const corsMaxAge = 300 * time.Second
+
+// SetupRouter wires every HTTP endpoint of the service: middleware chain,
+// public routes and the admin group protected by the DOU_Admin role.
 func SetupRouter(h *Handler) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
-	// Restrict credentialed cross-origin access to the local development UI origins.
+	// Restrict credentialed cross-origin access to the configured UI origins
+	// (SANCIRE_CORS_ORIGINS, local development ports by default).
+	origins := h.cfg.CORSOrigins
+	if len(origins) == 0 {
+		origins = config.DefaultCORSOrigins
+	}
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5173", "http://127.0.0.1:5173"},
-		AllowedMethods:   []string{"GET", "POST", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-User-Role"},
+		AllowedOrigins:   origins,
+		AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodPatch, http.MethodDelete, http.MethodOptions},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
 		ExposedHeaders:   []string{"Link", "Content-Disposition", "Content-Length"},
 		AllowCredentials: true,
-		MaxAge:           300,
+		MaxAge:           int(corsMaxAge.Seconds()),
 	}))
 	r.Use(AuthMiddleware(h.cfg.JWTSecret))
+
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/health", h.handleHealth)
+
 		// Auth
 		r.Post("/auth/login", h.handleLogin)
 		r.Get("/auth/me", h.handleMe)
-		// Chat
+
+		// Chat (JSON or SSE, chosen by the Accept header / ?stream=true)
 		r.Post("/chat", h.handleChat)
-		r.Post("/chat/stream", h.handleChat) // dedicated stream endpoint alias
+
 		// Conversations
 		r.Get("/conversations", h.handleListConversations)
 		r.Post("/conversations", h.handleCreateConversation)
@@ -37,19 +54,26 @@ func SetupRouter(h *Handler) http.Handler {
 		r.Get("/conversations/{id}", h.handleGetConversation)
 		r.Patch("/conversations/{id}", h.handleUpdateConversation)
 		r.Delete("/conversations/{id}", h.handleDeleteConversation)
+
 		// Settings
 		r.Get("/settings", h.handleGetSettings)
 		r.Patch("/settings", h.handleUpdateSettings)
-		// Templates
+
+		// Templates and the modular document catalogue
 		r.Get("/templates", h.handleListTemplates)
-		// Regulations
+		r.Get("/modules", h.handleListModules)
+
+		// Regulations reader
 		r.Get("/regulations", h.handleGetRegulations)
-		// Level 2 & Level 3 Document Operations
+
+		// Document generation (level 2) and audit (level 3)
 		r.Post("/documents/generate", h.handleGenerateDocument)
 		r.Post("/documents/audit", h.handleAuditDocument)
 		r.Get("/artifacts/{id}", h.handleGetArtifact)
-		// Admin & Versioning (RBAC protected: requires DOU_Admin role)
+
+		// Admin & versioning (RBAC: DOU_Admin only)
 		r.Route("/admin", func(r chi.Router) {
+			r.Get("/stats", RequireAdmin(h.handleAdminStats))
 			r.Get("/versions", RequireAdmin(h.handleListVersions))
 			r.Post("/versions/activate", RequireAdmin(h.handleActivateVersion))
 			// Regulation lifecycle: upload → activate → archive → delete

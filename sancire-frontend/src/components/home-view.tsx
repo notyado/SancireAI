@@ -1,5 +1,4 @@
-"use client";
-import { useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Composer } from "@/components/composer";
 import { AssistantPending } from "@/components/message-view";
@@ -15,23 +14,16 @@ const SUGGESTIONS = [
 export function HomeView() {
   const navigate = useNavigate();
   const { refreshConversations, showToast } = useApp();
-  const [hello, setHello] = useState("Добрый день");
   const [pending, setPending] = useState(false);
-  useEffect(() => {
-    setHello(greetingByHour(new Date().getHours()));
-  }, []);
+  const hello = useMemo(() => greetingByHour(new Date().getHours()), []);
   async function ask(text: string, files: { name: string; size: number; type: string }[] = []) {
     if (!text.trim() && files.length === 0) return;
     setPending(true);
     try {
       const title = text.slice(0, 45).trim() || (files[0] ? files[0].name : "Новый диалог");
       const conv = await createConversation(title);
-      if (typeof window !== "undefined") {
-        sessionStorage.setItem(
-          `sancire_pending_prompt_${conv.id}`,
-          JSON.stringify({ text, files }),
-        );
-      }
+      // chat-view picks the prompt up after the navigation and sends it.
+      sessionStorage.setItem(`sancire_pending_prompt_${conv.id}`, JSON.stringify({ text, files }));
       await refreshConversations();
       navigate(`/chat/${conv.id}`);
     } catch {

@@ -1,4 +1,3 @@
-"use client";
 import {
   createContext,
   useCallback,
@@ -8,8 +7,8 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { ConversationDraft, MessageMeta } from "@/db/schema";
-import { getAuthToken, setAuthToken, clearAuthToken } from "@/lib/chat-client";
+import type { ConversationDraft, MessageMeta, ModuleInfo } from "@/db/schema";
+import { authHeader, getAuthToken, jsonHeaders, setAuthToken, clearAuthToken } from "@/lib/chat-client";
 import { AuthModal } from "@/components/auth-modal";
 export type ConversationRow = {
   id: string;
@@ -45,6 +44,8 @@ type AppContextValue = {
   setLanguage: (language: string) => void;
   conversations: ConversationRow[];
   refreshConversations: () => Promise<void>;
+  /** Modular document catalogue from GET /api/modules; null while loading. */
+  modules: ModuleInfo[] | null;
   sidebarOpen: boolean;
   setSidebarOpen: (open: boolean) => void;
   reader: ReaderState;
@@ -71,6 +72,7 @@ export function AppProviders({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<ThemeMode>("dark");
   const [language, setLanguageState] = useState("ru");
   const [conversations, setConversations] = useState<ConversationRow[]>([]);
+  const [modules, setModules] = useState<ModuleInfo[] | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [reader, setReader] = useState<ReaderState>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -78,13 +80,13 @@ export function AppProviders({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const refreshConversations = useCallback(async () => {
-    const token = getAuthToken();
-    const headers: Record<string, string> = {};
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-    const response = await fetch("/api/conversations", { headers });
-    if (!response.ok) return;
-    const data = (await response.json()) as ConversationRow[];
-    setConversations(data);
+    try {
+      const response = await fetch("/api/conversations", { headers: authHeader() });
+      if (!response.ok) return;
+      setConversations((await response.json()) as ConversationRow[]);
+    } catch {
+      // The backend may be starting up; the sidebar simply stays empty.
+    }
   }, []);
   // Restore authentication and settings on mount
   useEffect(() => {
@@ -97,11 +99,11 @@ export function AppProviders({ children }: { children: ReactNode }) {
     if (cachedUser) {
       try {
         setUser(JSON.parse(cachedUser));
-      } catch (e) {}
+      } catch {
+        localStorage.removeItem("sancire_user");
+      }
     } else if (token) {
-      void fetch("/api/auth/me", {
-        headers: { Authorization: `Bearer ${token}` },
-      })
+      void fetch("/api/auth/me", { headers: authHeader() })
         .then((res) => (res.ok ? res.json() : null))
         .then((data) => {
           if (data?.user) {
@@ -110,7 +112,8 @@ export function AppProviders({ children }: { children: ReactNode }) {
           } else {
             clearAuthToken();
           }
-        });
+        })
+        .catch(() => clearAuthToken());
     } else {
       // Default initial login as employee for smooth preview
       setUser({
@@ -121,10 +124,22 @@ export function AppProviders({ children }: { children: ReactNode }) {
       });
     }
     void refreshConversations();
-    void fetch("/api/settings")
-      .then((res) => res.json())
-      .then((data: { language?: string; theme?: ThemeMode }) => {
+    // The catalogue is shared by the builder form and the sidebar badge, so it
+    // is loaded once here instead of per view.
+    void fetch("/api/modules", { headers: authHeader() })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: ModuleInfo[] | null) => setModules(data ?? []))
+      .catch(() => setModules([]));
+    void fetch("/api/settings", { headers: authHeader() })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { language?: string; theme?: ThemeMode } | null) => {
+        if (!data) return;
         if (data.language) setLanguageState(data.language);
+        // A theme chosen in this browser wins; otherwise adopt the server one.
+        if (data.theme && !localStorage.getItem("sancire-theme")) {
+          setThemeState(data.theme);
+          applyTheme(data.theme);
+        }
       })
       .catch(() => undefined);
   }, [refreshConversations]);
@@ -132,7 +147,7 @@ export function AppProviders({ children }: { children: ReactNode }) {
     async (username: string, password: string) => {
       const res = await fetch("/api/auth/login", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: jsonHeaders(),
         body: JSON.stringify({ username, password }),
       });
       if (!res.ok) {
@@ -161,17 +176,17 @@ export function AppProviders({ children }: { children: ReactNode }) {
     applyTheme(next);
     void fetch("/api/settings", {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
+      headers: jsonHeaders(),
       body: JSON.stringify({ theme: next }),
-    });
+    }).catch(() => undefined);
   }, []);
   const setLanguage = useCallback((next: string) => {
     setLanguageState(next);
     void fetch("/api/settings", {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
+      headers: jsonHeaders(),
       body: JSON.stringify({ language: next }),
-    });
+    }).catch(() => undefined);
   }, []);
   const showToast = useCallback((text: string) => {
     setToast(text);
@@ -185,6 +200,7 @@ export function AppProviders({ children }: { children: ReactNode }) {
       setLanguage,
       conversations,
       refreshConversations,
+      modules,
       sidebarOpen,
       setSidebarOpen,
       reader,
@@ -206,6 +222,7 @@ export function AppProviders({ children }: { children: ReactNode }) {
       setLanguage,
       conversations,
       refreshConversations,
+      modules,
       sidebarOpen,
       reader,
       toast,

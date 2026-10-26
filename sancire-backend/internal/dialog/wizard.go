@@ -150,17 +150,20 @@ func (e *Engine) wizardTurn(req Request, st *State, text, norm string) (Outcome,
 	if value == "" {
 		return finish(req, "Ответ пуст — введите значение или скажите «Пропустить».\n\n"+renderQuestion(st, fields, st.Step), "wizard.retry", st, fields, true), true
 	}
-	if field.Type == "choice" && len(field.Options) > 0 && !optionMatches(value, field.Options) {
-		ans := fmt.Sprintf("Нужен один из вариантов: %s.\n\n", strings.Join(field.Options, " / ")) + renderQuestion(st, fields, st.Step)
-		return finish(req, ans, "wizard.retry", st, fields, true), true
-	}
+	// Choice fields must resolve to one of the registry options; other fields
+	// that declare options are normalised when they match and kept verbatim
+	// otherwise.
 	if len(field.Options) > 0 {
-		value = pickOption(value, field.Options)
+		if picked, ok := matchOption(value, field.Options); ok {
+			value = picked
+		} else if field.Type == "choice" {
+			ans := fmt.Sprintf("Нужен один из вариантов: %s.\n\n", strings.Join(field.Options, " / ")) + renderQuestion(st, fields, st.Step)
+			return finish(req, ans, "wizard.retry", st, fields, true), true
+		}
 	}
-	// Date-like fields must be ДД.ММ.ГГГГ (loose: only enforced for Type=date
-	// or keys that obviously hold the final document date).
-	if (field.Type == "date" || field.Key == "start_date" || field.Key == "effective_date") &&
-		value != "" && !reDate.MatchString(value) {
+	// Date fields must be ДД.ММ.ГГГГ — the type is declared in the registry,
+	// so no per-key exceptions are needed.
+	if field.Type == "date" && value != "" && !reDate.MatchString(value) {
 		return finish(req, "Дата должна быть в формате ДД.ММ.ГГГГ — например 01.11.2026.\n\n"+renderQuestion(st, fields, st.Step), "wizard.retry", st, fields, true), true
 	}
 	st.Values[field.Key] = value
@@ -172,26 +175,18 @@ func (e *Engine) wizardTurn(req Request, st *State, text, norm string) (Outcome,
 	return e.advance(req, st, fields, field, false), true
 }
 
-func optionMatches(value string, options []string) bool {
-	v := strings.ToLower(strings.ReplaceAll(value, "ё", "е"))
+// matchOption resolves a free-form answer to one of the declared options: an
+// exact match or an option mentioned inside a longer answer
+// («возьму вариант разработанного» → «разработанного»).
+func matchOption(value string, options []string) (string, bool) {
+	v := normalizeText(value)
 	for _, o := range options {
-		ol := strings.ToLower(strings.ReplaceAll(o, "ё", "е"))
+		ol := normalizeText(o)
 		if v == ol || strings.Contains(v, ol) {
-			return true
+			return o, true
 		}
 	}
-	return false
-}
-
-func pickOption(value string, options []string) string {
-	v := strings.ToLower(strings.ReplaceAll(value, "ё", "е"))
-	for _, o := range options {
-		ol := strings.ToLower(strings.ReplaceAll(o, "ё", "е"))
-		if v == ol || strings.Contains(v, ol) {
-			return o
-		}
-	}
-	return value
+	return "", false
 }
 
 func (e *Engine) advance(req Request, st *State, fields []docx.ModuleField, field docx.ModuleField, skipped bool) Outcome {
@@ -235,11 +230,8 @@ func (e *Engine) finalize(req Request, st *State, fields []docx.ModuleField, mod
 			return finish(req, ans, "wizard.missing", st, fields, true)
 		}
 	}
-	values := map[string]string{}
-	for k, v := range st.Values {
-		values[k] = v
-	}
-	data, filename, err := docx.GenerateModuleDocx(e.templatesDir, st.ModuleID, values)
+	// GenerateModuleDocx only reads the collected values.
+	data, filename, err := docx.GenerateModuleDocx(e.templatesDir, st.ModuleID, st.Values)
 	if err != nil {
 		return finish(req, "Не удалось сформировать документ: "+err.Error()+"\n\nСкажите «Изменить» — поправим значения и повторим.", "wizard.error", st, fields, true)
 	}

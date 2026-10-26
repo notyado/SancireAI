@@ -45,11 +45,11 @@ type Scored struct {
 // Index is the in-memory knowledge index.
 type Index struct {
 	mu sync.RWMutex
-	// base = corpus files; regChunks = admin-uploaded active regulations.
-	chunks    []*Chunk
-	byID      map[string]*Chunk
-	base      []*Chunk
-	regChunks []*Chunk
+	// chunks is the merged search view, base the immutable corpus snapshot it
+	// is rebuilt from whenever the admin regulation set changes.
+	chunks []*Chunk
+	byID   map[string]*Chunk
+	base   []*Chunk
 }
 
 var stopwords = map[string]bool{
@@ -67,9 +67,20 @@ var stopwords = map[string]bool{
 }
 
 var (
-	reNonWord   = regexp.MustCompile(`[^0-9a-zа-яё]+`)
-	reClause    = regexp.MustCompile(`(\d{1,2}\.\d{1,2})\.\s`)
-	reMultiSp   = regexp.MustCompile(`\s+`)
+	reNonWord = regexp.MustCompile(`[^0-9a-zа-яё]+`)
+	reClause  = regexp.MustCompile(`(\d{1,2}\.\d{1,2})\.\s`)
+	reMultiSp = regexp.MustCompile(`\s+`)
+)
+
+const (
+	// instructionIDPrefix marks chunks of the ОД-184 instruction in the corpus.
+	instructionIDPrefix = "od184-"
+	// instructionDocID is the documents.json entry split into clause chunks.
+	instructionDocID = "dou_instruction"
+	// defaultVersionID is used when a corpus chunk carries no edition marker.
+	defaultVersionID = "v1.0"
+	// minChunkBodyRunes drops page fragments too short to be citable.
+	minChunkBodyRunes = 40
 )
 
 func normalize(s string) string {
@@ -78,7 +89,10 @@ func normalize(s string) string {
 	return reMultiSp.ReplaceAllString(strings.TrimSpace(s), " ")
 }
 
-func tokenize(s string) []string {
+// Tokenize splits text into meaningful lower-case terms: punctuation and
+// stopwords are dropped. It is the single tokeniser of the local index — the
+// dialog composer uses it too, so query and document terms always agree.
+func Tokenize(s string) []string {
 	norm := normalize(s)
 	if norm == "" {
 		return nil
@@ -93,8 +107,8 @@ func tokenize(s string) []string {
 	return out
 }
 
-// matchKey collapses long words to their first 5 characters so that light
-// Russian inflection ("согласование"/"согласования") still matches.
+// matchKey collapses long words to their first 4 runes so that light Russian
+// inflection ("согласование"/"согласования") still matches.
 func matchKey(w string) string {
 	r := []rune(w)
 	if len(r) > 4 {
@@ -115,10 +129,10 @@ func compileChunk(c *Chunk) *compiled {
 		titleSet: map[string]bool{},
 		normText: normalize(c.Text),
 	}
-	for _, w := range tokenize(c.Text) {
+	for _, w := range Tokenize(c.Text) {
 		cp.textKeys[matchKey(w)]++
 	}
-	for _, w := range tokenize(c.Title + " " + c.Clause + " " + c.DocumentTitle) {
+	for _, w := range Tokenize(c.Title + " " + c.Clause + " " + c.DocumentTitle) {
 		cp.titleSet[matchKey(w)] = true
 	}
 	return cp
@@ -149,10 +163,21 @@ func Load(corpusDir string) (*Index, error) {
 		return nil, fmt.Errorf("parse all_chunks.json: %w", err)
 	}
 	coveredPages := map[int]bool{}
+	edition, versionID := "", ""
 	for i := range curated {
 		c := curated[i]
-		if strings.HasPrefix(c.ID, "od184-") && c.Page > 0 {
-			coveredPages[c.Page] = true
+		if strings.HasPrefix(c.ID, instructionIDPrefix) {
+			if c.Page > 0 {
+				coveredPages[c.Page] = true
+			}
+			// The pages split below inherit the edition of the curated corpus
+			// so every chunk of ОД-184 reports the same «редакция от …».
+			if edition == "" {
+				edition = c.UpdatedAt
+			}
+			if versionID == "" {
+				versionID = c.VersionID
+			}
 		}
 		add(&c)
 	}
@@ -171,14 +196,14 @@ func Load(corpusDir string) (*Index, error) {
 		}
 		if err := json.Unmarshal(docsRaw, &docs); err == nil {
 			for _, d := range docs {
-				if d.ID != "dou_instruction" {
+				if d.ID != instructionDocID {
 					continue
 				}
 				for _, pg := range d.Pages {
 					if coveredPages[pg.Page] {
 						continue
 					}
-					for _, c := range splitPageIntoClauses(pg.Page, pg.Text, d.Title) {
+					for _, c := range splitPageIntoClauses(pg.Page, pg.Text, d.Title, edition, versionID) {
 						add(c)
 					}
 				}
@@ -232,12 +257,9 @@ func cleanWatermark(text string) string {
 		}
 		runLen := j - i
 		singleShort := runLen == 1 && utf8.RuneCountInString(strings.TrimLeft(words[i], ".·-")) <= 3
-		if runLen >= 2 || singleShort {
-			// drop the whole run (watermark fragment)
-			if len(out) > 0 && j < len(words) {
-				// keep spacing stable; collapse later
-			}
-		} else {
+		// A run of fragments — or a single very short all-caps token — is
+		// watermark noise and is dropped; everything else is kept verbatim.
+		if runLen < 2 && !singleShort {
 			out = append(out, words[i:j]...)
 		}
 		i = j
@@ -258,7 +280,8 @@ func isAllCapsCyrillic(s string) bool {
 }
 
 // splitPageIntoClauses converts a raw instruction page into clause chunks.
-func splitPageIntoClauses(page int, text, docTitle string) []*Chunk {
+// updatedAt and versionID come from the curated corpus (see Load).
+func splitPageIntoClauses(page int, text, docTitle, updatedAt, versionID string) []*Chunk {
 	clean := cleanWatermark(text)
 	clean = strings.TrimSpace(clean)
 	if clean == "" {
@@ -284,15 +307,18 @@ func splitPageIntoClauses(page int, text, docTitle string) []*Chunk {
 			pieces = append(pieces, piece{clause: "п. " + clause, body: body})
 		}
 	}
-	var out []*Chunk
+	if versionID == "" {
+		versionID = defaultVersionID
+	}
+	out := make([]*Chunk, 0, len(pieces))
 	for _, pc := range pieces {
 		body := strings.TrimSpace(pc.body)
-		if len(body) < 40 {
+		if utf8.RuneCountInString(body) < minChunkBodyRunes {
 			continue
 		}
-		id := fmt.Sprintf("od184-p%d|%s", page, strings.ReplaceAll(pc.clause, "п. ", ""))
+		id := fmt.Sprintf("%sp%d|%s", instructionIDPrefix, page, strings.TrimPrefix(pc.clause, "п. "))
 		if strings.HasPrefix(pc.clause, "Стр.") {
-			id = fmt.Sprintf("od184-p%d|pre", page)
+			id = fmt.Sprintf("%sp%d|pre", instructionIDPrefix, page)
 		}
 		out = append(out, &Chunk{
 			ID:            id,
@@ -301,9 +327,9 @@ func splitPageIntoClauses(page int, text, docTitle string) []*Chunk {
 			Title:         fmt.Sprintf("Инструкция по ДОУ, стр. %d", page),
 			Text:          body,
 			Page:          page,
-			UpdatedAt:     "15.10.2026",
+			UpdatedAt:     updatedAt,
 			Category:      "instruction",
-			VersionID:     "v1.0",
+			VersionID:     versionID,
 		})
 	}
 	return out
@@ -317,7 +343,6 @@ func (ix *Index) SetRegulations(chunks []*Chunk) {
 	}
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
-	ix.regChunks = nil
 	ix.chunks = make([]*Chunk, 0, len(ix.base)+len(chunks))
 	ix.byID = make(map[string]*Chunk, len(ix.base)+len(chunks))
 	addMerged := func(c *Chunk) {
@@ -338,7 +363,6 @@ func (ix *Index) SetRegulations(chunks []*Chunk) {
 	}
 	for _, c := range chunks {
 		addMerged(c)
-		ix.regChunks = append(ix.regChunks, c)
 	}
 }
 
@@ -384,19 +408,14 @@ func (ix *Index) Search(query string, limit int) []Scored {
 	}
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
-	qTokens := tokenize(query)
+	qTokens := Tokenize(query)
 	if len(qTokens) == 0 {
 		return nil
 	}
-	// Deduplicate query keys.
+	// Deduplicate query terms down to their match keys, counting repetitions.
 	keyWeights := map[string]float64{}
 	for _, w := range qTokens {
-		key := matchKey(w)
-		if len(w) >= 6 {
-			keyWeights[key] += 1.0
-		} else {
-			keyWeights[key] += 1.0
-		}
+		keyWeights[matchKey(w)]++
 	}
 	normQuery := normalize(query)
 	scores := make([]Scored, 0, 16)
@@ -452,21 +471,17 @@ func (ix *Index) Search(query string, limit int) []Scored {
 	return scores
 }
 
-// Excerpt trims a chunk text for display inside chat citations.
-func (c *Chunk) Excerpt(max int) string {
+// Excerpt trims a chunk text for display inside chat citations, preferably at
+// a sentence boundary.
+func (c *Chunk) Excerpt(limit int) string {
 	text := reMultiSp.ReplaceAllString(c.Text, " ")
 	runes := []rune(text)
-	if max <= 0 || len(runes) <= max {
+	if limit <= 0 || len(runes) <= limit {
 		return text
 	}
-	cut := string(runes[:max])
-	if i := strings.LastIndex(cut, ". "); i > max/2 {
+	cut := string(runes[:limit])
+	if i := strings.LastIndex(cut, ". "); i > limit/2 {
 		return cut[:i+1]
 	}
 	return cut + "…"
-}
-
-// SentenceCount is a tiny helper for answer composition.
-func SentenceCount(s string) int {
-	return strings.Count(s, ".") + strings.Count(s, "!")
 }

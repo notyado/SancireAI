@@ -1,8 +1,12 @@
 package docx
+
 import (
 	"sancireai/backend/internal/matrix"
 )
-// ModulesRegistry contains metadata for all 7 standard modules
+
+// ModulesRegistry contains metadata for all 7 standard modules.
+// Chat-oriented metadata (questions, triggers, anchors, category) is attached
+// in registry_meta.go's init().
 var ModulesRegistry = map[string]ModuleDefinition{
 	"M-01": {
 		ID:          "M-01",
@@ -11,7 +15,6 @@ var ModulesRegistry = map[string]ModuleDefinition{
 		FileName:    "m01_is_commissioning.docx",
 		Description: "Ввод разработанной или модернизированной информационной системы в промышленную эксплуатацию Банка.",
 		Kind:        matrix.KindOrder,
-		Active:      true,
 		Fields: []ModuleField{
 			{
 				Key:         "is_name",
@@ -90,7 +93,6 @@ var ModulesRegistry = map[string]ModuleDefinition{
 		FileName:    "m02_office_work_responsibles.docx",
 		Description: "Определение сотрудников подразделения, ответственных за ведение делопроизводства и работу в СЭД.",
 		Kind:        matrix.KindOrder,
-		Active:      true,
 		Fields: []ModuleField{
 			{
 				Key:         "department",
@@ -129,7 +131,6 @@ var ModulesRegistry = map[string]ModuleDefinition{
 		FileName:    "m03_transfer_affairs_property.docx",
 		Description: "Оформление передачи дел, документов, печатей и доступов при увольнении или смене руководителя.",
 		Kind:        matrix.KindOrder,
-		Active:      true,
 		Fields: []ModuleField{
 			{
 				Key:         "reason",
@@ -184,7 +185,6 @@ var ModulesRegistry = map[string]ModuleDefinition{
 		FileName:    "m04_approve_local_act.docx",
 		Description: "Введение в действие новых внутренних регламентов, порядков и положений.",
 		Kind:        matrix.KindOrder,
-		Active:      true,
 		Fields: []ModuleField{
 			{
 				Key:         "goal",
@@ -223,7 +223,6 @@ var ModulesRegistry = map[string]ModuleDefinition{
 		FileName:    "m05_internal_process_audit.docx",
 		Description: "Проведение планового или внепланового аудита бизнес-процессов в структурном подразделении.",
 		Kind:        matrix.KindDirective,
-		Active:      true,
 		Fields: []ModuleField{
 			{
 				Key:         "process_name",
@@ -270,7 +269,6 @@ var ModulesRegistry = map[string]ModuleDefinition{
 		FileName:    "m06_project_committee.docx",
 		Description: "Формирование коллегиального органа управления стратегическим проектом или портфелем.",
 		Kind:        matrix.KindDirective,
-		Active:      true,
 		Fields: []ModuleField{
 			{
 				Key:         "project_name",
@@ -311,7 +309,6 @@ var ModulesRegistry = map[string]ModuleDefinition{
 		FileName:    "m07_working_group.docx",
 		Description: "Создание временной межфункциональной группы для решения оперативной или проектной задачи.",
 		Kind:        matrix.KindDirective,
-		Active:      true,
 		Fields: []ModuleField{
 			{
 				Key:         "group_goal",

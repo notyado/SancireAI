@@ -1,19 +1,25 @@
+// Package api exposes the HTTP surface of SancireAI: chat, conversations,
+// document generation and audit, the regulation lifecycle and health checks.
 package api
+
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
+
 	"sancireai/backend/internal/config"
 	"sancireai/backend/internal/dialog"
 	"sancireai/backend/internal/docx"
@@ -22,12 +28,34 @@ import (
 	"sancireai/backend/internal/rag"
 	"sancireai/backend/internal/store"
 )
+
+const (
+	// serviceVersion is reported by GET /api/health.
+	serviceVersion = "1.0.0"
+	// defaultConversationTitle is used when a thread has no usable first message.
+	defaultConversationTitle = "Новый диалог"
+	// conversationTitleRunes caps the generated thread title.
+	conversationTitleRunes = 52
+
+	// Background Qdrant sync must never block an admin action, but it also must
+	// not outlive the process by much.
+	qdrantRemoveTimeout  = 60 * time.Second
+	qdrantCleanupTimeout = 30 * time.Second
+	qdrantPushTimeout    = 5 * time.Minute
+
+	// adminStatsTimeout bounds the infrastructure probes of /api/admin/stats.
+	adminStatsTimeout = 4 * time.Second
+)
+
+// Handler bundles everything the HTTP layer needs.
 type Handler struct {
 	cfg    config.Config
 	store  *store.Store
 	rag    *rag.Engine
 	dialog *dialog.Engine
 }
+
+// NewHandler wires the store, the RAG engine and the dialog engine together.
 func NewHandler(cfg config.Config, s *store.Store, r *rag.Engine) *Handler {
 	dlg := dialog.NewEngine(cfg.TemplatesDir, cfg.CorpusDir)
 	dlg.UseLLM(r)
@@ -81,26 +109,106 @@ func regulationToScored(rows []store.RegulationChunk) []rag.ScoredChunk {
 	}
 	return out
 }
-// Auth Handlers
+
+// ---------------------------------------------------------------------------
+// Shared response helpers
+// ---------------------------------------------------------------------------
+
+// writeJSON answers with a JSON body and the given status.
+func writeJSON(w http.ResponseWriter, status int, data any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(data)
+}
+
+// writeError answers with {"error": code} plus an optional human-readable
+// message. Unlike http.Error the body is real JSON, so the frontend can show
+// the message instead of a parse error.
+func writeError(w http.ResponseWriter, status int, code, message string) {
+	body := map[string]string{"error": code}
+	if message != "" {
+		body["message"] = message
+	}
+	writeJSON(w, status, body)
+}
+
+// writeDocx streams a generated document as a download.
+func writeDocx(w http.ResponseWriter, filename string, data []byte) {
+	w.Header().Set("Content-Type", docxContentType)
+	w.Header().Set("Content-Disposition", contentDisposition(filename))
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+const docxContentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+// contentDisposition builds an RFC 5987 header so Cyrillic file names survive
+// the download in every browser.
+func contentDisposition(filename string) string {
+	return "attachment; filename*=UTF-8''" + url.PathEscape(filename)
+}
+
+// conversationTitle derives a thread title from the first message, falling back
+// to the first attachment name and finally to the neutral default.
+func conversationTitle(text string, files []dialog.File) string {
+	if title := truncateTitle(text); title != "" {
+		return title
+	}
+	if len(files) > 0 {
+		if title := truncateTitle(files[0].Name); title != "" {
+			return title
+		}
+	}
+	return defaultConversationTitle
+}
+
+// truncateTitle normalises whitespace and caps the length; it returns an empty
+// string when there is nothing to title.
+func truncateTitle(text string) string {
+	s := strings.Join(strings.Fields(strings.ReplaceAll(strings.TrimSpace(text), "\n", " ")), " ")
+	if s == "" {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) > conversationTitleRunes {
+		return string(runes[:conversationTitleRunes]) + "…"
+	}
+	return s
+}
+
+// truncateTitleOr is truncateTitle with a fallback for an empty result.
+func truncateTitleOr(text, fallback string) string {
+	if title := truncateTitle(text); title != "" {
+		return title
+	}
+	return fallback
+}
+
+// sizeLimitMB renders a byte limit as the whole megabytes shown in error text.
+func sizeLimitMB(limit int64) int64 { return limit / (1 << 20) }
+
+// ---------------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------------
+
 func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid_json"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_json", "")
 		return
 	}
 	user, err := h.store.ValidateUser(strings.TrimSpace(req.Username), req.Password)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnauthorized)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_credentials", "message": err.Error()})
+		writeError(w, http.StatusUnauthorized, "invalid_credentials", err.Error())
 		return
 	}
 	token, err := GenerateToken(user, h.cfg.JWTSecret, h.cfg.TokenTTL)
 	if err != nil {
-		http.Error(w, `{"error":"token_generation_failed"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "token_generation_failed", "")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -116,7 +224,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 	claims, ok := r.Context().Value(UserContextKey).(*Claims)
 	if !ok || claims == nil {
-		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "unauthorized", "")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -138,25 +246,27 @@ type chatBody struct {
 }
 
 // generateTurn routes one chat turn either to the deterministic dialog engine
-// (wizard / knowledge / audit) or to the legacy RAG pipeline for explain and
-// expert actions. It persists wizard draft state and generated artifacts.
-func (h *Handler) generateTurn(r *http.Request, conv *store.Conversation, userContent string, history []rag.ChatMessage, body chatBody, versionCode string, token func(string)) (string, any, error) {
-	if body.Action == "explain" || body.Action == "expert" {
-		return h.rag.GenerateAnswer(r.Context(), userContent, history, body.Action, body.Selection, versionCode, token)
+// (wizard / knowledge / audit) or to the local LLM for the «Объяснить» and
+// «Эксперт» actions. It persists wizard draft state and generated artifacts.
+func (h *Handler) generateTurn(r *http.Request, conv *store.Conversation, userContent string, body chatBody, token func(string)) (string, any, error) {
+	if body.Action == rag.ActionExplain || body.Action == rag.ActionExpert {
+		if h.rag == nil {
+			return "", nil, errors.New("LLM engine is not configured")
+		}
+		return h.rag.GenerateAnswer(r.Context(), userContent, body.Action, body.Selection, token)
 	}
 	// "Уточнить" deep-dives the selected fragment: query the KB with the
 	// selection itself so the answer stays grounded in that passage.
 	dText := userContent
-	if body.Action == "clarify" && body.Selection != "" {
+	if body.Action == actionClarify && body.Selection != "" {
 		dText = body.Selection
 	}
 	out := h.dialog.Respond(dialog.Request{
-		Ctx:    r.Context(),
-		Text:   dText,
-		Action: body.Action,
-		Files:  body.Files,
-		Draft:  conv.Draft,
-		Token:  token,
+		Ctx:   r.Context(),
+		Text:  dText,
+		Files: body.Files,
+		Draft: conv.Draft,
+		Token: token,
 	})
 	if out.Artifact != nil {
 		id := uuid.NewString()
@@ -183,12 +293,12 @@ func (h *Handler) generateTurn(r *http.Request, conv *store.Conversation, userCo
 func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	var body chatBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, `{"error":"invalid_json"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_json", "")
 		return
 	}
 	text := strings.TrimSpace(body.Content)
-	if text == "" && len(body.Files) == 0 && body.Action != "expert" {
-		http.Error(w, `{"error":"empty"}`, http.StatusBadRequest)
+	if text == "" && len(body.Files) == 0 && body.Action != rag.ActionExpert {
+		writeError(w, http.StatusBadRequest, "empty", "")
 		return
 	}
 	conversationID := body.ConversationID
@@ -196,22 +306,15 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	if conversationID == "" {
 		conversationID = uuid.NewString()
 		created = true
-		title := truncateTitle(text)
-		if title == "" && len(body.Files) > 0 {
-			title = body.Files[0].Name
-		}
-		if title == "" {
-			title = "Новый диалог"
-		}
-		if _, err := h.store.CreateConversation(conversationID, title); err != nil {
+		if _, err := h.store.CreateConversation(conversationID, conversationTitle(text, body.Files)); err != nil {
 			log.Error().Err(err).Msg("failed to create conversation")
-			http.Error(w, `{"error":"db_error"}`, http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, "db_error", "")
 			return
 		}
 	}
 	conv, err := h.store.GetConversation(conversationID)
 	if err != nil {
-		http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "not_found", "")
 		return
 	}
 	// Prepare user content
@@ -239,24 +342,17 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	userMsg, err := h.store.CreateMessage(userMsgID, conversationID, "user", userContent, userMeta)
 	if err != nil {
-		http.Error(w, `{"error":"db_error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "db_error", "")
 		return
 	}
-	// Fetch history
+	// Fetch history — only its length matters: a thread with a single message
+	// is brand new and gets its title from this turn.
 	historyMsgs, err := h.store.ListMessages(conversationID)
 	if err != nil {
 		historyMsgs = []store.Message{*userMsg}
 	}
-	var chatHistory []rag.ChatMessage
-	for _, m := range historyMsgs {
-		chatHistory = append(chatHistory, rag.ChatMessage{Role: m.Role, Content: m.Content})
-	}
-	// Active version
-	activeVer, _ := h.store.GetActiveVersion()
-	versionCode := "v1.0"
-	if activeVer != nil {
-		versionCode = activeVer.Code
-	}
+	firstTurn := len(historyMsgs) <= 1
+
 	// Check if client expects SSE streaming
 	wantsSSE := strings.Contains(r.Header.Get("Accept"), "text/event-stream") || r.URL.Query().Get("stream") == "true"
 	if wantsSSE {
@@ -266,7 +362,7 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Accel-Buffering", "no")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, "streaming_unsupported", "Сервер не поддерживает потоковую отдачу")
 			return
 		}
 		sendSSE := func(event string, payload any) {
@@ -282,68 +378,86 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		tokenCallback := func(token string) {
 			sendSSE("token", map[string]string{"token": token})
 		}
-		ans, meta, err := h.generateTurn(r, conv, userContent, chatHistory, body, versionCode, tokenCallback)
+		ans, meta, err := h.generateTurn(r, conv, userContent, body, tokenCallback)
 		if r.Context().Err() != nil {
-			// Client cancelled/aborted request
+			// Client cancelled/aborted the request: keep whatever was produced,
+			// but there is nobody left to send it to.
 			if ans != "" {
-				asstMsgID := uuid.NewString()
-				h.store.CreateMessage(asstMsgID, conversationID, "assistant", ans, meta)
+				if _, err := h.store.CreateMessage(uuid.NewString(), conversationID, "assistant", ans, meta); err != nil {
+					log.Error().Err(err).Msg("failed to persist the answer of a cancelled turn")
+				}
 			}
 			return
 		}
 		if err != nil {
-			ans = "Произошла ошибка при формировании ответа. Пожалуйста, повторите запрос."
+			log.Error().Err(err).Msg("chat turn failed")
+			ans = chatFailureText
 		}
-		asstMsgID := uuid.NewString()
-		asstMsg, _ := h.store.CreateMessage(asstMsgID, conversationID, "assistant", ans, meta)
-		// Update title if first message
-		if len(historyMsgs) <= 1 {
-			title := truncateTitle(userContent)
-			conv, _ = h.store.UpdateConversation(conversationID, &title, nil, nil)
-		} else {
-			conv, _ = h.store.GetConversation(conversationID)
+		payload, err := h.turnPayload(conversationID, created, firstTurn, userContent, userMsg, ans, meta)
+		if err != nil {
+			// Headers are already flushed — the stream simply ends here.
+			log.Error().Err(err).Msg("failed to persist the assistant answer")
+			return
 		}
-		allMsgs, _ := h.store.ListMessages(conversationID)
-		sendSSE("complete", map[string]any{
-			"conversation":     conv,
-			"created":          created,
-			"userMessage":      userMsg,
-			"assistantMessage": asstMsg,
-			"messages":         allMsgs,
-		})
+		sendSSE("complete", payload)
 		return
 	}
 	// Standard non-streaming JSON response
-	ans, meta, err := h.generateTurn(r, conv, userContent, chatHistory, body, versionCode, nil)
+	ans, meta, err := h.generateTurn(r, conv, userContent, body, nil)
 	if err != nil {
-		ans = "Произошла ошибка при обращении к базе знаний. Пожалуйста, повторите попытку."
+		log.Error().Err(err).Msg("chat turn failed")
+		ans = chatFailureText
 	}
-	asstMsgID := uuid.NewString()
-	asstMsg, err := h.store.CreateMessage(asstMsgID, conversationID, "assistant", ans, meta)
+	payload, err := h.turnPayload(conversationID, created, firstTurn, userContent, userMsg, ans, meta)
 	if err != nil {
-		http.Error(w, `{"error":"db_error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "db_error", "")
 		return
 	}
-	if len(historyMsgs) <= 1 {
-		title := truncateTitle(userContent)
-		conv, _ = h.store.UpdateConversation(conversationID, &title, nil, nil)
-	} else {
-		conv, _ = h.store.GetConversation(conversationID)
+	writeJSON(w, http.StatusOK, payload)
+}
+
+// chatFailureText is shown when a turn could not be answered at all.
+const chatFailureText = "Произошла ошибка при формировании ответа. Пожалуйста, повторите запрос."
+
+// turnPayload persists the assistant answer, titles a brand-new thread from its
+// first message and builds the response body shared by the SSE and the plain
+// JSON branches of POST /api/chat.
+func (h *Handler) turnPayload(conversationID string, created, firstTurn bool, userContent string, userMsg *store.Message, answer string, meta any) (map[string]any, error) {
+	asstMsg, err := h.store.CreateMessage(uuid.NewString(), conversationID, "assistant", answer, meta)
+	if err != nil {
+		return nil, err
 	}
-	allMsgs, _ := h.store.ListMessages(conversationID)
-	writeJSON(w, http.StatusOK, map[string]any{
+	var conv *store.Conversation
+	if firstTurn {
+		title := conversationTitle(userContent, nil)
+		conv, err = h.store.UpdateConversation(conversationID, &title, nil, nil)
+		if err != nil {
+			log.Warn().Err(err).Msg("failed to retitle the conversation")
+			conv = nil
+		}
+	}
+	if conv == nil {
+		if conv, err = h.store.GetConversation(conversationID); err != nil {
+			return nil, err
+		}
+	}
+	allMsgs, err := h.store.ListMessages(conversationID)
+	if err != nil {
+		allMsgs = []store.Message{}
+	}
+	return map[string]any{
 		"conversation":     conv,
 		"created":          created,
 		"userMessage":      userMsg,
 		"assistantMessage": asstMsg,
 		"messages":         allMsgs,
-	})
+	}, nil
 }
 // Conversation Handlers
 func (h *Handler) handleListConversations(w http.ResponseWriter, r *http.Request) {
 	list, err := h.store.ListConversations()
 	if err != nil {
-		http.Error(w, `{"error":"db_error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "db_error", "")
 		return
 	}
 	writeJSON(w, http.StatusOK, list)
@@ -353,20 +467,16 @@ func (h *Handler) handleCreateConversation(w http.ResponseWriter, r *http.Reques
 		Title string `json:"title"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	title := body.Title
-	if title == "" {
-		title = "Новый диалог"
-	}
-	conv, err := h.store.CreateConversation(uuid.NewString(), title)
+	conv, err := h.store.CreateConversation(uuid.NewString(), truncateTitleOr(body.Title, defaultConversationTitle))
 	if err != nil {
-		http.Error(w, `{"error":"db_error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "db_error", "")
 		return
 	}
 	writeJSON(w, http.StatusOK, conv)
 }
 func (h *Handler) handleDeleteAllConversations(w http.ResponseWriter, r *http.Request) {
 	if err := h.store.ClearAllConversations(); err != nil {
-		http.Error(w, `{"error":"db_error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "db_error", "")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -375,7 +485,7 @@ func (h *Handler) handleGetConversation(w http.ResponseWriter, r *http.Request) 
 	id := chi.URLParam(r, "id")
 	conv, err := h.store.GetConversation(id)
 	if err != nil {
-		http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "not_found", "")
 		return
 	}
 	msgs, err := h.store.ListMessages(id)
@@ -395,12 +505,12 @@ func (h *Handler) handleUpdateConversation(w http.ResponseWriter, r *http.Reques
 		Draft  any     `json:"draft"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, `{"error":"invalid_json"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_json", "")
 		return
 	}
 	updated, err := h.store.UpdateConversation(id, body.Title, body.Pinned, body.Draft)
 	if err != nil {
-		http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "not_found", "")
 		return
 	}
 	writeJSON(w, http.StatusOK, updated)
@@ -408,7 +518,7 @@ func (h *Handler) handleUpdateConversation(w http.ResponseWriter, r *http.Reques
 func (h *Handler) handleDeleteConversation(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if err := h.store.DeleteConversation(id); err != nil {
-		http.Error(w, `{"error":"db_error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "db_error", "")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -417,7 +527,8 @@ func (h *Handler) handleDeleteConversation(w http.ResponseWriter, r *http.Reques
 func (h *Handler) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	st, err := h.store.GetSettings()
 	if err != nil {
-		st = &store.Setting{ID: "default", Theme: "dark", Language: "ru"}
+		log.Warn().Err(err).Msg("settings load failed, serving defaults")
+		st = &store.Setting{Theme: store.DefaultTheme, Language: store.DefaultLanguage}
 	}
 	writeJSON(w, http.StatusOK, st)
 }
@@ -427,18 +538,30 @@ func (h *Handler) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		Language string `json:"language"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, `{"error":"invalid_json"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_json", "")
 		return
 	}
+	// A partial PATCH must not reset the other preference: fill the gaps from
+	// the stored row (the UI sends only the field the user just changed).
+	if body.Theme == "" || body.Language == "" {
+		if current, err := h.store.GetSettings(); err == nil {
+			if body.Theme == "" {
+				body.Theme = current.Theme
+			}
+			if body.Language == "" {
+				body.Language = current.Language
+			}
+		}
+	}
 	if body.Theme == "" {
-		body.Theme = "dark"
+		body.Theme = store.DefaultTheme
 	}
 	if body.Language == "" {
-		body.Language = "ru"
+		body.Language = store.DefaultLanguage
 	}
 	st, err := h.store.UpdateSettings(body.Theme, body.Language)
 	if err != nil {
-		http.Error(w, `{"error":"db_error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "db_error", "")
 		return
 	}
 	writeJSON(w, http.StatusOK, st)
@@ -447,10 +570,47 @@ func (h *Handler) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 	tpls, err := h.store.ListTemplates()
 	if err != nil {
-		http.Error(w, `{"error":"db_error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "db_error", "")
 		return
 	}
 	writeJSON(w, http.StatusOK, tpls)
+}
+
+// handleListModules GET /api/modules returns the modular document catalogue
+// straight from the generator registry, so the builder form and the .docx
+// generator can never drift apart.
+func (h *Handler) handleListModules(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, docx.Modules())
+}
+
+// handleAdminStats GET /api/admin/stats returns the live infrastructure numbers
+// of the admin dashboard instead of the hard-coded ones it used to render.
+func (h *Handler) handleAdminStats(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), adminStatsTimeout)
+	defer cancel()
+
+	regs, err := h.store.ListRegulations()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db_error", "")
+		return
+	}
+	active := 0
+	for _, reg := range regs {
+		if reg.Status == store.RegActive {
+			active++
+		}
+	}
+	stats := map[string]any{
+		"modules":           len(docx.ModuleIDs()),
+		"kbChunks":          h.dialog.CorpusSize(),
+		"minRelevanceScore": h.cfg.MinRelevanceScore,
+		"regulations":       map[string]any{"total": len(regs), "active": active},
+	}
+	if h.rag != nil {
+		stats["qdrant"] = h.rag.CollectionStats(ctx)
+		stats["ollama"] = h.rag.LLMStats(ctx)
+	}
+	writeJSON(w, http.StatusOK, stats)
 }
 // Regulations Handlers
 func (h *Handler) handleGetRegulations(w http.ResponseWriter, r *http.Request) {
@@ -470,22 +630,22 @@ func (h *Handler) handleGetRegulations(w http.ResponseWriter, r *http.Request) {
 		}
 		// Fallback: section ids produced by the local knowledge index
 		// (od184…, recom…, matrix…) resolve through the dialog engine.
-		if chunkID, docTitle, clause, text, updatedAt, ok := h.dialog.Section(sectionID); ok {
+		if chunk, ok := h.dialog.Section(sectionID); ok {
 			writeJSON(w, http.StatusOK, map[string]any{
 				"regulation": map[string]any{
-					"id":             "kb-" + docTitle,
-					"title":          docTitle,
-					"updatedAtLabel": firstNonEmpty(updatedAt, "15.10.2026"),
+					"id":             "kb-" + chunk.DocumentTitle,
+					"title":          chunk.DocumentTitle,
+					"updatedAtLabel": chunk.UpdatedAt, // empty when the corpus carries no edition
 					"intro":          "Фрагмент нормативного документа из локальной базы знаний SancireAI.",
 					"sections": []map[string]any{
-						{"id": chunkID, "clause": clause, "title": "", "text": text},
+						{"id": chunk.ID, "clause": chunk.Clause, "title": chunk.Title, "text": chunk.Text},
 					},
 				},
-				"section": map[string]any{"id": chunkID},
+				"section": map[string]any{"id": chunk.ID},
 			})
 			return
 		}
-		http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "not_found", "")
 		return
 	}
 	if id != "" {
@@ -497,7 +657,7 @@ func (h *Handler) handleGetRegulations(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "not_found", "")
 		return
 	}
 	var summaryList []map[string]any
@@ -519,50 +679,43 @@ func (h *Handler) handleGenerateDocument(w http.ResponseWriter, r *http.Request)
 		Values   map[string]string `json:"values"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, `{"error":"invalid_json"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_json", "")
 		return
 	}
 	docBytes, filename, err := docx.GenerateModuleDocx(h.cfg.TemplatesDir, body.ModuleID, body.Values)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "generation_failed", "message": err.Error()})
+		writeError(w, http.StatusBadRequest, "generation_failed", err.Error())
 		return
 	}
-	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(docBytes)))
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(docBytes)
+	writeDocx(w, filename, docBytes)
 }
 // Level 3: Document Audit Handler
 func (h *Handler) handleAuditDocument(w http.ResponseWriter, r *http.Request) {
 	// Parse multipart form with 15MB limit
 	if err := r.ParseMultipartForm(docx.MaxDocxUploadSize); err != nil {
-		http.Error(w, `{"error":"file_too_large","message":"Размер файла превышает 15 МБ"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "file_too_large",
+			fmt.Sprintf("Размер файла превышает %d МБ", sizeLimitMB(docx.MaxDocxUploadSize)))
 		return
 	}
 	file, header, err := r.FormFile("file")
 	if err != nil {
-		http.Error(w, `{"error":"missing_file","message":"Файл .docx не передан"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "missing_file", "Файл .docx не передан")
 		return
 	}
 	defer file.Close()
 	if !strings.HasSuffix(strings.ToLower(header.Filename), ".docx") {
-		http.Error(w, `{"error":"invalid_format","message":"Поддерживается только формат DOCX"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_format", "Поддерживается только формат DOCX")
 		return
 	}
 	data, err := io.ReadAll(file)
 	if err != nil {
-		http.Error(w, `{"error":"read_failed"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "read_failed", "")
 		return
 	}
 	overrideModuleID := r.FormValue("moduleId")
 	report, err := docx.AuditDocx(data, header.Filename, overrideModuleID)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "audit_failed", "message": err.Error()})
+		writeError(w, http.StatusBadRequest, "audit_failed", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, report)
@@ -571,7 +724,7 @@ func (h *Handler) handleAuditDocument(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleListVersions(w http.ResponseWriter, r *http.Request) {
 	list, err := h.store.ListVersions()
 	if err != nil {
-		http.Error(w, `{"error":"db_error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "db_error", "")
 		return
 	}
 	writeJSON(w, http.StatusOK, list)
@@ -581,11 +734,11 @@ func (h *Handler) handleActivateVersion(w http.ResponseWriter, r *http.Request) 
 		Code string `json:"code"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, `{"error":"invalid_json"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_json", "")
 		return
 	}
 	if err := h.store.ActivateVersion(body.Code); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"activate_failed","message":"%s"}`, err.Error()), http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "activate_failed", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "activeCode": body.Code})
@@ -595,7 +748,7 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":      true,
 		"service": "SancireAI Backend",
-		"version": "1.0.0",
+		"version": serviceVersion,
 		"qdrant":  h.cfg.QdrantURL,
 		"ollama":  h.cfg.OllamaURL,
 	})
@@ -614,7 +767,7 @@ var regulationKinds = map[string]bool{
 func (h *Handler) handleListRegulations(w http.ResponseWriter, r *http.Request) {
 	list, err := h.store.ListRegulations()
 	if err != nil {
-		http.Error(w, `{"error":"db_error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "db_error", "")
 		return
 	}
 	if list == nil {
@@ -626,22 +779,24 @@ func (h *Handler) handleListRegulations(w http.ResponseWriter, r *http.Request) 
 // handleUploadRegulation POST /api/admin/regulations/upload (multipart)
 func (h *Handler) handleUploadRegulation(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(maxRegulationUpload); err != nil {
-		http.Error(w, `{"error":"file_too_large","message":"Размер файла превышает 30 МБ"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "file_too_large",
+			fmt.Sprintf("Размер файла превышает %d МБ", sizeLimitMB(maxRegulationUpload)))
 		return
 	}
 	file, header, err := r.FormFile("file")
 	if err != nil {
-		http.Error(w, `{"error":"missing_file","message":"Файл не передан"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "missing_file", "Файл не передан")
 		return
 	}
 	defer file.Close()
 	data, err := io.ReadAll(io.LimitReader(file, maxRegulationUpload+1))
 	if err != nil {
-		http.Error(w, `{"error":"read_failed"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "read_failed", "")
 		return
 	}
 	if len(data) > maxRegulationUpload {
-		http.Error(w, `{"error":"file_too_large","message":"Размер файла превышает 30 МБ"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "file_too_large",
+			fmt.Sprintf("Размер файла превышает %d МБ", sizeLimitMB(maxRegulationUpload)))
 		return
 	}
 	title := strings.TrimSpace(r.FormValue("title"))
@@ -654,26 +809,24 @@ func (h *Handler) handleUploadRegulation(w http.ResponseWriter, r *http.Request)
 	}
 	text, err := extract.Text(header.Filename, data)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "extract_failed", "message": err.Error()})
+		writeError(w, http.StatusBadRequest, "extract_failed", err.Error())
 		return
 	}
 	pieces := extract.ChunkText(text)
 	if len(pieces) == 0 {
-		http.Error(w, `{"error":"empty_text","message":"Не удалось выделить текстовые фрагменты"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "empty_text", "Не удалось выделить текстовые фрагменты")
 		return
 	}
 	id := uuid.NewString()
 	dir := filepath.Join(h.cfg.DataDir, "regulations")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		http.Error(w, `{"error":"fs_error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "fs_error", "")
 		return
 	}
 	ext := strings.ToLower(filepath.Ext(header.Filename))
 	filePath := filepath.Join(dir, id+ext)
 	if err := os.WriteFile(filePath, data, 0o644); err != nil {
-		http.Error(w, `{"error":"fs_error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "fs_error", "")
 		return
 	}
 	chunks := make([]store.RegulationChunk, 0, len(pieces))
@@ -688,7 +841,7 @@ func (h *Handler) handleUploadRegulation(w http.ResponseWriter, r *http.Request)
 		})
 	}
 	if err := h.store.SaveRegulation(id, title, kind, header.Filename, filePath, store.RegDraft, chunks); err != nil {
-		http.Error(w, `{"error":"db_error","message":"`+err.Error()+`"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "db_error", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -702,40 +855,29 @@ func (h *Handler) handleUploadRegulation(w http.ResponseWriter, r *http.Request)
 func (h *Handler) handleRegulationStatus(w http.ResponseWriter, r *http.Request, status string) {
 	id := chi.URLParam(r, "id")
 	if _, err := h.store.GetRegulation(id); err != nil {
-		http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "not_found", "")
 		return
 	}
 	prevIDs, targetIDs, err := h.store.SetRegulationStatus(id, status)
 	if err != nil {
-		http.Error(w, `{"error":"db_error","message":"`+err.Error()+`"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "db_error", err.Error())
 		return
 	}
 	h.refreshRegulationIndex()
 	// Best-effort Qdrant sync (async — never blocks the admin action).
-	if h.rag != nil {
-		ragEngine := h.rag
-		if len(prevIDs) > 0 {
-			ids := prevIDs
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-				defer cancel()
-				if err := ragEngine.RemoveChunkPoints(ctx, ids); err != nil {
-					log.Warn().Err(err).Msg("qdrant: prev active points not removed")
-				}
-			}()
-		}
-		if status == store.RegActive && len(targetIDs) > 0 {
-			rows, err := h.store.RegulationChunks(id)
-			if err == nil {
-				chunks := regulationToScored(rows)
-				go func() {
-					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-					defer cancel()
-					if err := ragEngine.PushChunks(ctx, chunks); err != nil {
-						log.Warn().Err(err).Msg("qdrant: regulation push failed")
-					}
-				}()
-			}
+	if len(prevIDs) > 0 {
+		ids := prevIDs
+		h.asyncQdrant(qdrantRemoveTimeout, "previous active points not removed",
+			func(ctx context.Context) error { return h.rag.RemoveChunkPoints(ctx, ids) })
+	}
+	if status == store.RegActive && len(targetIDs) > 0 {
+		rows, err := h.store.RegulationChunks(id)
+		if err != nil {
+			log.Warn().Err(err).Str("regulation", id).Msg("chunks for the qdrant push not loaded")
+		} else {
+			chunks := regulationToScored(rows)
+			h.asyncQdrant(qdrantPushTimeout, "regulation push failed",
+				func(ctx context.Context) error { return h.rag.PushChunks(ctx, chunks) })
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": status})
@@ -756,33 +898,46 @@ func (h *Handler) handleDeleteRegulation(w http.ResponseWriter, r *http.Request)
 	id := chi.URLParam(r, "id")
 	reg, err := h.store.GetRegulation(id)
 	if err != nil {
-		http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "not_found", "")
 		return
 	}
-	chunkIDs, _ := h.store.RegulationChunkIDs(id)
+	// The stored file path must be read BEFORE the row is deleted.
+	filePath, pathErr := h.store.RegulationFilePath(id)
+	chunkIDs, err := h.store.RegulationChunkIDs(id)
+	if err != nil {
+		log.Warn().Err(err).Str("regulation", id).Msg("chunk ids for vector cleanup not loaded")
+	}
 	if err := h.store.DeleteRegulation(id); err != nil {
-		http.Error(w, `{"error":"db_error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "db_error", "")
 		return
 	}
-	if fp, err := h.store.RegulationFilePath(id); err == nil {
-		_ = fp
+	if pathErr != nil {
+		log.Warn().Err(pathErr).Str("regulation", id).Msg("uploaded file path unknown, the file stays on disk")
+	} else if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+		log.Warn().Err(err).Str("path", filePath).Msg("uploaded regulation file not removed")
 	}
-	// file path lookup after delete fails — capture before delete next time;
-	// best effort: glob the known filename pattern.
-	_ = os.Remove(filepath.Join(h.cfg.DataDir, "regulations", id+".pdf"))
-	_ = os.Remove(filepath.Join(h.cfg.DataDir, "regulations", id+".docx"))
-	_ = os.Remove(filepath.Join(h.cfg.DataDir, "regulations", id+".txt"))
-	_ = os.Remove(filepath.Join(h.cfg.DataDir, "regulations", id+".md"))
 	h.refreshRegulationIndex()
-	if h.rag != nil && reg.Status == store.RegActive && len(chunkIDs) > 0 {
-		ragEngine := h.rag
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			_ = ragEngine.RemoveChunkPoints(ctx, chunkIDs)
-		}()
+	if reg.Status == store.RegActive && len(chunkIDs) > 0 {
+		h.asyncQdrant(qdrantCleanupTimeout, "points of a deleted regulation not removed",
+			func(ctx context.Context) error { return h.rag.RemoveChunkPoints(ctx, chunkIDs) })
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// asyncQdrant runs a vector-index update in the background with its own
+// timeout. Qdrant being down must never fail an admin action: the local index
+// stays the source of truth, so failures are only logged.
+func (h *Handler) asyncQdrant(timeout time.Duration, what string, op func(ctx context.Context) error) {
+	if h.rag == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		if err := op(ctx); err != nil {
+			log.Warn().Err(err).Msg("qdrant: " + what)
+		}
+	}()
 }
 
 // handleDownloadRegulation GET /api/admin/regulations/{id}/file
@@ -790,15 +945,15 @@ func (h *Handler) handleDownloadRegulation(w http.ResponseWriter, r *http.Reques
 	id := chi.URLParam(r, "id")
 	reg, err := h.store.GetRegulation(id)
 	if err != nil {
-		http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "not_found", "")
 		return
 	}
 	filePath, err := h.store.RegulationFilePath(id)
 	if err != nil {
-		http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "not_found", "")
 		return
 	}
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename*=UTF-8''%s`, url.PathEscape(reg.Filename)))
+	w.Header().Set("Content-Disposition", contentDisposition(reg.Filename))
 	http.ServeFile(w, r, filePath)
 }
 
@@ -807,40 +962,9 @@ func (h *Handler) handleGetArtifact(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	art, err := h.store.GetArtifact(id)
 	if err != nil {
-		http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "not_found", "")
 		return
 	}
-	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename*=UTF-8''%s`, url.PathEscape(art.Filename)))
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(art.Data)))
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(art.Data)
+	writeDocx(w, art.Filename, art.Data)
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-func writeJSON(w http.ResponseWriter, status int, data any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(data)
-}
-func truncateTitle(text string) string {
-	s := strings.TrimSpace(text)
-	if s == "" {
-		return "Новый диалог"
-	}
-	s = strings.ReplaceAll(s, "\n", " ")
-	s = strings.Join(strings.Fields(s), " ")
-	runes := []rune(s)
-	if len(runes) > 52 {
-		return string(runes[:52]) + "…"
-	}
-	return s
-}

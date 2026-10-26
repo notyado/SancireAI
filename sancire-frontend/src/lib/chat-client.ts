@@ -22,33 +22,41 @@ export function clearAuthToken() {
     localStorage.removeItem("sancire_user");
   }
 }
-function authHeaders(accept = "application/json"): Record<string, string> {
-  const headers: Record<string, string> = { "Content-Type": "application/json", Accept: accept };
+/** Corporate roles issued by the backend (store.RoleAdmin / store.RoleEmployee). */
+export const ROLE_ADMIN = "DOU_Admin";
+
+/** UI caption of a corporate role. */
+export function roleLabel(role?: string | null): string {
+  return role === ROLE_ADMIN ? "Администратор ДОУ" : "Сотрудник";
+}
+
+/** Mirrors docx.MaxDocxUploadSize — larger files are rejected by the backend. */
+export const MAX_DOCX_BYTES = 15 * 1024 * 1024;
+
+/**
+ * Authorization header of the current session (an empty object when anonymous).
+ * Use it for GET requests and for multipart uploads, where a Content-Type
+ * header would break the form boundary.
+ */
+export function authHeader(): Record<string, string> {
   const token = getAuthToken();
-  if (token) headers.Authorization = `Bearer ${token}`;
-  return headers;
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+/** Headers for a JSON request body; `accept` may ask for an SSE stream. */
+export function jsonHeaders(accept = "application/json"): Record<string, string> {
+  return { "Content-Type": "application/json", Accept: accept, ...authHeader() };
 }
 
 export async function createConversation(title?: string): Promise<{ id: string }> {
   const response = await fetch("/api/conversations", {
     method: "POST",
-    headers: authHeaders(),
+    headers: jsonHeaders(),
     body: JSON.stringify({ title: title || "Новый диалог" }),
   });
   if (!response.ok) throw new Error(`create_conv_failed_${response.status}`);
   return (await response.json()) as { id: string };
 }
-
-export async function sendChat(payload: ChatPayload): Promise<ChatResponse> {
-  const response = await fetch("/api/chat", {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify(payload),
-  });
-  if (!response.ok) throw new Error(`chat_failed_${response.status}`);
-  return await response.json() as ChatResponse;
-}
-
 
 /**
  * Reads Server-Sent Events incrementally. `onStarted` fires as soon as the server
@@ -64,7 +72,7 @@ export async function sendChatStream(
 ): Promise<void> {
   let started = false;
   let completed = false;
-  const headers = authHeaders("text/event-stream");
+  const headers = jsonHeaders("text/event-stream");
   try {
     const response = await fetch("/api/chat?stream=true", {
       method: "POST",

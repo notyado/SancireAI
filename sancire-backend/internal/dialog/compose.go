@@ -15,6 +15,28 @@ import (
 	"sancireai/backend/internal/rag"
 )
 
+// Retrieval thresholds of the composer. Lexical scores are unbounded term
+// weights, vector scores are cosine similarities in [0;1].
+const (
+	searchLimit      = 5    // chunks pulled from the local index
+	vectorLimit      = 4    // chunks pulled from Qdrant
+	confident        = 6.0  // lexical score that alone justifies an answer
+	weak             = 3.0  // below this the lexical evidence is only "related"
+	vecRescue        = 0.62 // cosine score that may rescue a weak lexical match
+	maxContextChunks = 5    // fragments forwarded to the model in one prompt
+	minAIRunes       = 120  // a model answer shorter than this is not trusted
+)
+
+// Window parameters of bestSentence / firstSentence (runes).
+const (
+	sentenceWindow     = 430 // runes in one scoring window
+	sentenceStep       = 60  // step the window slides by
+	maxSentenceRunes   = 460 // a chunk shorter than this is quoted whole
+	hardSentenceCut    = 470 // absolute cap of the quoted span
+	firstSentenceRunes = 240 // cap of a step description in a process card
+	minQueryTermRunes  = 4   // shorter terms carry no topical signal
+)
+
 var (
 	reProcessQ = regexp.MustCompile(`(порядок|последователь|этап|шаг|как\s|что дальше|далее|маршрут|организац\w+\s+согласован|организовать\s+согласован)`)
 	reNegative = regexp.MustCompile(`(не регламентир|не установлено|не предусмотрен|не указана|не указывается|не содержит|не требует|не производится|не допускается|отсутствует)`)
@@ -34,22 +56,19 @@ func (e *Engine) compose(req Request, text, norm string) Outcome {
 		return e.reply(req, indexMissingText, Meta{Intent: "answer.notFound", NotFound: true,
 			FollowUps: []string{"Что ты умеешь?", "Приказ о вводе ИС в эксплуатацию (М-01)", "Задать вопрос эксперту"}})
 	}
-	hits := e.ix.Search(text, 5)
+	hits := e.ix.Search(text, searchLimit)
 	lexTop := 0.0
 	if len(hits) > 0 {
 		lexTop = hits[0].Score
 	}
-	const confident = 6.0
-	const weak = 3.0
 
 	// Vector fusion — only when Qdrant is up; harmless when it is not.
 	// A vector hit may SUPPLEMENT lexical evidence or rescue a query only
 	// when it is very confident on its own: casual/noise queries whose
 	// embeddings land near arbitrary chunks must not bypass the refusal.
-	const vecRescue = 0.62
 	var vec []rag.ScoredChunk
 	if e.llm != nil {
-		if v, err := e.llm.VectorSearchText(ctx, text, 4); err == nil {
+		if v, err := e.llm.VectorSearchText(ctx, text, vectorLimit); err == nil {
 			vec = v
 		}
 	}
@@ -77,7 +96,7 @@ func (e *Engine) compose(req Request, text, norm string) Outcome {
 			sources = append(sources, sourceOf(h.Chunk))
 		}
 		b.WriteString("\nЕсли вопрос не про эти разделы — уточните формулировку или задайте его эксперту ДОУ.")
-		return e.stream(req, b.String(), Meta{
+		return e.reply(req, b.String(), Meta{
 			Intent:    "answer.related",
 			Sources:   sources,
 			NotFound:  true,
@@ -111,8 +130,8 @@ func (e *Engine) compose(req Request, text, norm string) Outcome {
 	aiShown := ""
 	if e.llm != nil && len(hits) > 0 && e.llm.LLMHealthy(ctx) {
 		candidates := hits
-		if len(candidates) > 5 {
-			candidates = candidates[:5]
+		if len(candidates) > maxContextChunks {
+			candidates = candidates[:maxContextChunks]
 		}
 		ans, flushed, err := e.llm.GroundedAnswerStream(ctx, text, toScoredChunks(candidates), func(s string) {
 			emit(req.Token, s)
@@ -148,14 +167,13 @@ func (e *Engine) compose(req Request, text, norm string) Outcome {
 			emit(req.Token, content)
 			return Outcome{Answer: aiShown + "\n\n" + content, Meta: meta}
 		}
-		return e.stream(req, content, meta)
+		return e.reply(req, content, meta)
 	}
 	if aiShown != "" {
 		b.WriteString("**Модель не прошла проверку на цитируемость — дозываю строго по текстам материалов.**\n\n")
 	}
 
-	var sources []Source
-	sources = append(sources, sourceOf(top))
+	sources := []Source{sourceOf(top)}
 	used := map[string]bool{top.ID: true}
 
 	b.WriteString(fmt.Sprintf("Ответ по материалам — %s документа «%s»:\n\n", top.Clause, top.DocumentTitle))
@@ -219,6 +237,7 @@ func chunkFromScored(v rag.ScoredChunk) *kb.Chunk {
 		Text:          v.Text,
 		Page:          v.Page,
 		UpdatedAt:     v.UpdatedAt,
+		VersionID:     v.VersionID,
 		Category:      v.Category,
 	}
 }
@@ -235,6 +254,7 @@ func toScoredChunks(hits []kb.Scored) []rag.ScoredChunk {
 			Text:          h.Chunk.Text,
 			Page:          h.Chunk.Page,
 			UpdatedAt:     h.Chunk.UpdatedAt,
+			VersionID:     h.Chunk.VersionID,
 			Category:      h.Chunk.Category,
 			Score:         h.Score,
 		})
@@ -247,7 +267,7 @@ func groundedOK(ans string, candidates []kb.Scored) bool {
 	if strings.Contains(ans, "НЕТ_ОТВЕТА") {
 		return false
 	}
-	if utf8.RuneCountInString(ans) < 120 {
+	if utf8.RuneCountInString(ans) < minAIRunes {
 		return false
 	}
 	ids := map[string]bool{}
@@ -315,34 +335,33 @@ func bestSentence(c *kb.Chunk, query string) string {
 	if text == "" {
 		return ""
 	}
-	qTokens := tokenizePublic(query)
 	runes := []rune(text)
-	lower := strings.ToLower(strings.ReplaceAll(text, "ё", "е"))
+	if len(runes) <= maxSentenceRunes {
+		return text
+	}
 
-	// Distinct, meaningful query terms (4+ chars already stemmed by the caller).
+	// Distinct, meaningful query terms (stopwords are already filtered out by
+	// the index tokeniser, so scoring is not diluted by «можно», «какой», …).
 	var terms []string
 	seen := map[string]bool{}
-	for _, t := range qTokens {
-		if len([]rune(t)) < 4 || seen[t] {
+	for _, t := range kb.Tokenize(query) {
+		if len([]rune(t)) < minQueryTermRunes || seen[t] {
 			continue
 		}
 		seen[t] = true
 		terms = append(terms, t)
 	}
-	if len(runes) <= 460 || len(terms) == 0 {
-		if len(runes) <= 460 {
-			return text
-		}
+	if len(terms) == 0 {
+		return c.Excerpt(maxSentenceRunes)
 	}
 
-	const win = 430
+	// Slide a rune window over the lower-cased text and keep the window with
+	// the most distinct query terms.
+	lowerRunes := []rune(strings.ToLower(strings.ReplaceAll(text, "ё", "е")))
 	bestStart, bestScore := 0, -1
-	for start := 0; start < len(runes); start += 60 {
-		end := start + win
-		if end > len(runes) {
-			end = len(runes)
-		}
-		piece := lower[start:minInt(end, len(lower))] // byte/rune mismatch is tolerable for scoring
+	for start := 0; start < len(lowerRunes); start += sentenceStep {
+		end := min(start+sentenceWindow, len(lowerRunes))
+		piece := string(lowerRunes[start:end])
 		score := 0
 		for _, t := range terms {
 			if strings.Contains(piece, t) {
@@ -353,37 +372,27 @@ func bestSentence(c *kb.Chunk, query string) string {
 			bestScore = score
 			bestStart = start
 		}
-		if end == len(runes) {
+		if end == len(lowerRunes) {
 			break
 		}
 	}
 	if bestScore <= 0 {
-		return c.Excerpt(460)
+		return c.Excerpt(maxSentenceRunes)
 	}
 	// Align to word boundaries.
 	lo := bestStart
 	for lo > 0 && runes[lo] != ' ' && runes[lo] != '\n' {
 		lo--
 	}
-	hi := minInt(lo+win, len(runes))
+	hi := min(lo+sentenceWindow, len(runes))
 	for hi < len(runes) && runes[hi] != ' ' && runes[hi] != '\n' {
 		hi++
 	}
 	span := strings.TrimSpace(string(runes[lo:hi]))
-	if len([]rune(span)) > 470 {
-		span = string([]rune(span)[:470]) + "…"
-	}
 	if span == "" {
-		return c.Excerpt(460)
+		return c.Excerpt(maxSentenceRunes)
 	}
-	return span
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+	return truncateRunes(span, hardSentenceCut) + suffixIfTruncated(span, hardSentenceCut)
 }
 
 func splitSentences(s string) []string {
@@ -415,26 +424,27 @@ func splitSentences(s string) []string {
 
 func firstSentence(s string) string {
 	if parts := splitSentences(s); len(parts) > 0 {
-		r := []rune(parts[0])
-		if len(r) > 240 {
-			return string(r[:240]) + "…"
-		}
-		return parts[0]
+		return truncateRunes(parts[0], firstSentenceRunes) + suffixIfTruncated(parts[0], firstSentenceRunes)
 	}
 	c := &kb.Chunk{Text: s}
-	return c.Excerpt(240)
+	return c.Excerpt(firstSentenceRunes)
 }
 
-func tokenizePublic(s string) []string {
-	// simple lowercased word split — kb.tokenize is package-private
-	s = strings.ToLower(strings.ReplaceAll(s, "ё", "е"))
-	s = strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'а' && r <= 'я') || (r >= '0' && r <= '9') {
-			return r
-		}
-		return ' '
-	}, s)
-	return strings.Fields(s)
+// truncateRunes cuts s to at most n runes without splitting a character.
+func truncateRunes(s string, n int) string {
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n])
+}
+
+// suffixIfTruncated is the ellipsis that marks a truncated fragment.
+func suffixIfTruncated(s string, n int) string {
+	if len([]rune(s)) > n {
+		return "…"
+	}
+	return ""
 }
 
 func followUpsFor(top *kb.Chunk, isProcess bool) []string {
@@ -520,6 +530,3 @@ func auditFollowUps(r *docx.AuditReport) []string {
 	}
 	return []string{"Какой будет маршрут визирования?", "Сформировать документ по модулю", "Задать вопрос эксперту"}
 }
-
-// Ensure docx symbols referenced above exist at compile time.
-var _ = docx.SeverityCritical

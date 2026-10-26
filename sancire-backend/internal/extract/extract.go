@@ -33,8 +33,8 @@ func Text(filename string, data []byte) (string, error) {
 }
 
 var (
-	reXMLTag  = regexp.MustCompile(`<[^>]+>`)
-	reXMLSpace = regexp.MustCompile(`\r?\n\s*\r?\n+`)
+	reXMLTag     = regexp.MustCompile(`<[^>]+>`)
+	reBlankLines = regexp.MustCompile(`\r?\n\s*\r?\n+`)
 )
 
 func fromDOCX(data []byte) (string, error) {
@@ -111,32 +111,46 @@ type Chunk struct {
 
 var reLeadingClause = regexp.MustCompile(`^(\d{1,2}(?:\.\d{1,2}){0,2})[.)]?\s`)
 
-// ChunkText splits a regulation into citation-sized pieces (~≤900 chars),
-// preferring paragraph and sentence boundaries.
+// Chunking limits, in runes (the corpus is Cyrillic, so byte counts would be
+// roughly twice as large and would not reflect the visible citation size).
+const (
+	// minChunkRunes — fragments shorter than this are dropped as noise.
+	minChunkRunes = 40
+	// softFlushRunes — a paragraph break closes the chunk once it grew past this.
+	softFlushRunes = 250
+	// maxChunkRunes — hard ceiling for a single citation-sized chunk.
+	maxChunkRunes = 850
+	// titleRunes — length of the auto-generated chunk title.
+	titleRunes = 70
+)
+
+// ChunkText splits a regulation into citation-sized pieces (≤ maxChunkRunes),
+// preferring paragraph boundaries and dropping fragments that are too short.
 func ChunkText(text string) []Chunk {
 	paragraphs := strings.Split(text, "\n")
 	var out []Chunk
 	var buf strings.Builder
+	var bufRunes int
 	seq := 0
 
-	flush := func(force bool) {
-		if buf.Len() == 0 {
+	flush := func() {
+		if bufRunes == 0 {
 			return
 		}
 		body := strings.TrimSpace(buf.String())
 		buf.Reset()
-		if len([]rune(body)) < 40 && !force {
+		bufRunes = 0
+		runes := []rune(body)
+		if len(runes) < minChunkRunes {
 			return
 		}
 		clause := fmt.Sprintf("Фрагмент %d", seq+1)
 		if m := reLeadingClause.FindStringSubmatch(body); m != nil {
 			clause = "п. " + strings.TrimSuffix(m[1], ".")
 		}
-		title := ""
-		if r := []rune(body); len(r) > 70 {
-			title = strings.TrimSpace(string(r[:70])) + "…"
-		} else {
-			title = body
+		title := body
+		if len(runes) > titleRunes {
+			title = strings.TrimSpace(string(runes[:titleRunes])) + "…"
 		}
 		seq++
 		out = append(out, Chunk{Seq: seq, Clause: clause, Title: title, Text: body})
@@ -145,20 +159,21 @@ func ChunkText(text string) []Chunk {
 	for _, para := range paragraphs {
 		para = strings.TrimSpace(para)
 		if para == "" {
-			if buf.Len() > 500 {
-				flush(false)
+			if bufRunes > softFlushRunes {
+				flush()
 			}
 			continue
 		}
-		if buf.Len() > 0 {
+		if bufRunes > 0 {
 			buf.WriteString("\n")
+			bufRunes++
 		}
 		buf.WriteString(para)
-		// Keep chunks citation-sized: cut at a sentence end near the limit.
-		if len([]rune(buf.String())) >= 850 {
-			flush(false)
+		bufRunes += utf8.RuneCountInString(para)
+		if bufRunes >= maxChunkRunes {
+			flush()
 		}
 	}
-	flush(false)
+	flush()
 	return out
 }

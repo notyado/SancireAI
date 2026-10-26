@@ -1,4 +1,22 @@
 package api
+
+import "strings"
+
+// od184Edition is the revision date of the curated Инструкция по ДОУ
+// (Приказ № ОД-184). store.od184EditionDate shows the same date as DD.MM.YYYY
+// to the knowledge-base seeding code.
+const od184Edition = "2026-10-15"
+
+// formatRevisionLabel renders a curated revision date (YYYY-MM-DD) in the
+// DD.MM.YYYY form the reader panel shows, so both JSON fields always agree.
+func formatRevisionLabel(iso string) string {
+	parts := strings.Split(iso, "-")
+	if len(parts) != 3 {
+		return iso
+	}
+	return parts[2] + "." + parts[1] + "." + parts[0]
+}
+
 type RegulationSection struct {
 	ID       string   `json:"id"`
 	Clause   string   `json:"clause"`
@@ -15,14 +33,15 @@ type Regulation struct {
 	Intro          string              `json:"intro"`
 	Sections       []RegulationSection `json:"sections"`
 }
+// RegulationsData is the curated fragment table served by GET /api/regulations
+// (see handleListRegulations); uploaded regulations live in the database.
 var RegulationsData = []Regulation{
 	{
-		ID:             "docflow",
-		Title:          "Инструкция по документообороту в Банке России",
-		ShortTitle:     "Инструкция по документообороту",
-		UpdatedAt:      "2026-10-15",
-		UpdatedAtLabel: "15.10.2026",
-		Intro:          "Инструкция определяет единые правила подготовки, согласования, подписания, регистрации и хранения внутренних документов Банка России (Приказ № ОД-184).",
+		ID:          "docflow",
+		Title:       "Инструкция по документообороту в Банке России",
+		ShortTitle:  "Инструкция по документообороту",
+		UpdatedAt:   od184Edition,
+		Intro:       "Инструкция определяет единые правила подготовки, согласования, подписания, регистрации и хранения внутренних документов Банка России (Приказ № ОД-184).",
 		Sections: []RegulationSection{
 			{
 				ID:     "docflow-1-1",
@@ -63,12 +82,11 @@ var RegulationsData = []Regulation{
 		},
 	},
 	{
-		ID:             "approval",
-		Title:          "Регламент согласования внутренних нормативных актов",
-		ShortTitle:     "Регламент согласования",
-		UpdatedAt:      "2026-10-15",
-		UpdatedAtLabel: "15.10.2026",
-		Intro:          "Регламент устанавливает последовательность, сроки и ответственность согласующих подразделений при прохождении маршрута визирования по Матрице.",
+		ID:          "approval",
+		Title:       "Регламент согласования внутренних нормативных актов",
+		ShortTitle:  "Регламент согласования",
+		UpdatedAt:   od184Edition,
+		Intro:       "Регламент устанавливает последовательность, сроки и ответственность согласующих подразделений при прохождении маршрута визирования по Матрице.",
 		Sections: []RegulationSection{
 			{
 				ID:     "approval-1-1",
@@ -97,12 +115,11 @@ var RegulationsData = []Regulation{
 		},
 	},
 	{
-		ID:             "business_trip",
-		Title:          "Положение о служебных командировках работников",
-		ShortTitle:     "Положение о командировках",
-		UpdatedAt:      "2026-09-01",
-		UpdatedAtLabel: "01.09.2026",
-		Intro:          "Положение устанавливает порядок направления работников в служебные командировки по территории РФ и за рубеж, возмещения расходов и предоставления отчетности.",
+		ID:          "business_trip",
+		Title:       "Положение о служебных командировках работников",
+		ShortTitle:  "Положение о командировках",
+		UpdatedAt:   "2026-09-01",
+		Intro:       "Положение устанавливает порядок направления работников в служебные командировки по территории РФ и за рубеж, возмещения расходов и предоставления отчетности.",
 		Sections: []RegulationSection{
 			{
 				ID:     "trip-1-1",
@@ -131,12 +148,11 @@ var RegulationsData = []Regulation{
 		},
 	},
 	{
-		ID:             "vacation",
-		Title:          "Положение об отпусках работников",
-		ShortTitle:     "Положение об отпусках",
-		UpdatedAt:      "2026-06-15",
-		UpdatedAtLabel: "15.06.2026",
-		Intro:          "Положение регулирует порядок составления графика отпусков, предоставления ежегодных, дополнительных и учебных отпусков, а также отзыва из отпуска.",
+		ID:          "vacation",
+		Title:       "Положение об отпусках работников",
+		ShortTitle:  "Положение об отпусках",
+		UpdatedAt:   "2026-06-15",
+		Intro:       "Положение регулирует порядок составления графика отпусков, предоставления ежегодных, дополнительных и учебных отпусков, а также отзыва из отпуска.",
 		Sections: []RegulationSection{
 			{
 				ID:     "leave-1-1",
@@ -159,12 +175,11 @@ var RegulationsData = []Regulation{
 		},
 	},
 	{
-		ID:             "infosec",
-		Title:          "Регламент обеспечения информационной безопасности",
-		ShortTitle:     "Регламент ИБ",
-		UpdatedAt:      "2026-08-20",
-		UpdatedAtLabel: "20.08.2026",
-		Intro:          "Регламент определяет правила доступа к информационным системам, обработки конфиденциальной информации и действия при инцидентах ИБ.",
+		ID:          "infosec",
+		Title:       "Регламент обеспечения информационной безопасности",
+		ShortTitle:  "Регламент ИБ",
+		UpdatedAt:   "2026-08-20",
+		Intro:       "Регламент определяет правила доступа к информационным системам, обработки конфиденциальной информации и действия при инцидентах ИБ.",
 		Sections: []RegulationSection{
 			{
 				ID:     "security-2-4",
@@ -180,4 +195,10 @@ var RegulationsData = []Regulation{
 			},
 		},
 	},
+}
+
+func init() {
+	for i := range RegulationsData {
+		RegulationsData[i].UpdatedAtLabel = formatRevisionLabel(RegulationsData[i].UpdatedAt)
+	}
 }

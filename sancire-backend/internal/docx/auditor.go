@@ -1,23 +1,31 @@
 package docx
+
 import (
 	"archive/zip"
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
 	"strings"
+
 	"sancireai/backend/internal/matrix"
 )
+
 const (
-	MaxDocxUploadSize      = 15 * 1024 * 1024 // 15 MB
-	MaxDocxDecompressSize  = 60 * 1024 * 1024 // 60 MB
-	MaxZipEntries          = 150
+	MaxDocxUploadSize     = 15 * 1024 * 1024 // 15 MB
+	MaxDocxDecompressSize = 60 * 1024 * 1024 // 60 MB
+	MaxZipEntries         = 150
 )
+
 var (
 	reBracketPlaceholder = regexp.MustCompile(`\[\d+\]`)
 	reUnderlineSequence  = regexp.MustCompile(`_{3,}`)
 	reEmptyDatePattern   = regexp.MustCompile(`«___»|\.\.\.20__|\b20___`)
+	// reISAbbrev matches the «ИС» abbreviation as a standalone word: a plain
+	// substring test would also fire on «исполнение», «использование», …
+	reISAbbrev = regexp.MustCompile(`(?:^|[^\p{L}])ис(?:[^\p{L}]|$)`)
 )
 // AuditDocx performs comprehensive validation of an uploaded DOCX document
 func AuditDocx(data []byte, filename string, overrideModuleID string) (*AuditReport, error) {
@@ -29,14 +37,14 @@ func AuditDocx(data []byte, filename string, overrideModuleID string) (*AuditRep
 		return nil, fmt.Errorf("файл не является корректным DOCX архивом: %w", err)
 	}
 	if len(zipReader.File) > MaxZipEntries {
-		return nil, fmt.Errorf("превышено допустимое число элементов архива (защита от zip-бомб)")
+		return nil, errors.New("превышено допустимое число элементов архива (защита от zip-бомб)")
 	}
 	var totalDecompressed int64
 	var docXMLBytes []byte
 	for _, f := range zipReader.File {
 		totalDecompressed += int64(f.UncompressedSize64)
 		if totalDecompressed > MaxDocxDecompressSize {
-			return nil, fmt.Errorf("превышен лимит распакованного содержимого (защита от zip-бомб)")
+			return nil, errors.New("превышен лимит распакованного содержимого (защита от zip-бомб)")
 		}
 		if f.Name == "word/document.xml" {
 			rc, err := f.Open()
@@ -51,7 +59,7 @@ func AuditDocx(data []byte, filename string, overrideModuleID string) (*AuditRep
 		}
 	}
 	if len(docXMLBytes) == 0 {
-		return nil, fmt.Errorf("в архиве отсутствует основной документ word/document.xml")
+		return nil, errors.New("в архиве отсутствует основной документ word/document.xml")
 	}
 	// Extract plain text runs from document.xml
 	textContent, err := extractPlainTextFromXML(docXMLBytes)
@@ -117,7 +125,7 @@ func AuditDocx(data []byte, filename string, overrideModuleID string) (*AuditRep
 		)
 	}
 	// 4. Check for presence of EP visualization zone
-	if !strings.Contains(textContent, "ВИЗУАЛИЗАЦИЯ ЭП") && !strings.Contains(textContent, "ЭЛЕКТРОННОЙ ПОДПИСИ") && !strings.Contains(textContent, "ЭП") {
+	if !containsAny(textContent, "ЭП", "ЭЛЕКТРОННОЙ ПОДПИСИ") {
 		addFinding(
 			SeverityWarning,
 			"Отсутствует обязательная зона визуализации электронной подписи",
@@ -128,7 +136,7 @@ func AuditDocx(data []byte, filename string, overrideModuleID string) (*AuditRep
 		)
 	}
 	// 5. Check for registration number zone
-	if !strings.Contains(textContent, "РЕГИСТРАЦИОННЫЙ НОМЕР") && !strings.Contains(textContent, "ДАТА /") && !strings.Contains(textContent, "№") {
+	if !containsAny(textContent, "РЕГИСТРАЦИОННЫЙ НОМЕР", "ДАТА /", "№") {
 		addFinding(
 			SeverityWarning,
 			"Отсутствует зона даты и регистрационного номера",
@@ -165,13 +173,12 @@ func AuditDocx(data []byte, filename string, overrideModuleID string) (*AuditRep
 			}
 		}
 	}
-	// Determine condition flags
-	hasISAccessChange := strings.Contains(strings.ToLower(textContent), "доступ") &&
-		(strings.Contains(strings.ToLower(textContent), "информацион") || strings.Contains(strings.ToLower(textContent), "ис") || strings.Contains(strings.ToLower(textContent), "систем"))
-	isITProject := strings.Contains(strings.ToLower(textContent), "ит-проект") ||
-		strings.Contains(strings.ToLower(textContent), "информационн") ||
-		strings.Contains(strings.ToLower(textContent), "программн") ||
-		strings.Contains(strings.ToLower(textContent), "цифров")
+	// Matrix condition flags (Строки 2 и 6): transfer of IS access rights and
+	// IT-project wording. Both are detected from the document text.
+	lowerText := strings.ToLower(textContent)
+	hasISAccessChange := strings.Contains(lowerText, "доступ") &&
+		(strings.Contains(lowerText, "информацион") || reISAbbrev.MatchString(lowerText) || strings.Contains(lowerText, "систем"))
+	isITProject := containsAny(lowerText, "ит-проект", "информационн", "программн", "цифров")
 	// Calculate visa routing using Matrix engine
 	docCtx := matrix.DocumentContext{
 		Kind:              detectedKind,
@@ -266,30 +273,36 @@ func extractTitle(text string) string {
 	}
 	return "Проект документа"
 }
+// matchModuleByText detects the module by the trigger phrases declared in the
+// registry (single source of truth — the same list the chat wizard uses). The
+// module with the most trigger hits wins; ties are resolved by module code so
+// that, e.g., an M-06 project mentioning «информационных систем» is not
+// mistaken for M-01.
 func matchModuleByText(title, content string) string {
-	full := strings.ToLower(title + " " + content)
-	if strings.Contains(full, "вводе в эксплуатацию") && strings.Contains(full, "информацион") {
-		return "M-01"
+	full := normalizeForCompare(title + " " + content)
+	best := ""
+	bestHits := 0
+	for _, id := range ModuleIDs() {
+		hits := 0
+		for _, trigger := range ModulesRegistry[id].Triggers {
+			if strings.Contains(full, normalizeForCompare(trigger)) {
+				hits++
+			}
+		}
+		if hits > bestHits {
+			best, bestHits = id, hits
+		}
 	}
-	if strings.Contains(full, "ответственных за делопроизводство") {
-		return "M-02"
+	return best
+}
+
+func containsAny(s string, needles ...string) bool {
+	for _, n := range needles {
+		if strings.Contains(s, n) {
+			return true
+		}
 	}
-	if strings.Contains(full, "приеме и передаче дел") {
-		return "M-03"
-	}
-	if strings.Contains(full, "утверждении и введении в действие") {
-		return "M-04"
-	}
-	if strings.Contains(full, "внутреннего аудита") {
-		return "M-05"
-	}
-	if strings.Contains(full, "проектного комитета") {
-		return "M-06"
-	}
-	if strings.Contains(full, "рабочей группы") {
-		return "M-07"
-	}
-	return ""
+	return false
 }
 func uniqueStrings(slice []string) []string {
 	seen := make(map[string]bool)

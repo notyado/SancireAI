@@ -1,8 +1,9 @@
-"use client";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useApp } from "@/components/providers";
-import { createConversation } from "@/lib/chat-client";
+import { authHeader, createConversation } from "@/lib/chat-client";
+
+/** One row of GET /api/templates (store.Template). */
 type TemplateRow = {
   id: string;
   title: string;
@@ -16,12 +17,21 @@ export default function TemplatesPage() {
   const [category, setCategory] = useState("Все");
   const [pending, setPending] = useState<string | null>(null);
   const navigate = useNavigate();
-  const { refreshConversations } = useApp();
+  const { refreshConversations, showToast } = useApp();
   useEffect(() => {
-    void fetch("/api/templates")
-      .then((res) => res.json())
-      .then((data: TemplateRow[]) => setItems(data));
-  }, []);
+    let cancelled = false;
+    void fetch("/api/templates", { headers: authHeader() })
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(String(res.status)))))
+      .then((data: TemplateRow[]) => {
+        if (!cancelled) setItems(data ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) showToast("Не удалось загрузить библиотеку шаблонов");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showToast]);
   const categories = useMemo(
     () => ["Все", ...Array.from(new Set(items.map((item) => item.category)))],
     [items],
@@ -29,29 +39,21 @@ export default function TemplatesPage() {
   const visible = items.filter((item) => category === "Все" || item.category === category);
   const popular = visible.filter((item) => item.popular);
   const rest = visible.filter((item) => !item.popular);
+  // The assistant resolves the template from the title, so the prompt is built
+  // from the catalogue itself instead of a hard-coded id → phrase mapping.
   async function start(item: TemplateRow) {
     setPending(item.id);
-    const prompt =
-      item.id === "memo"
-        ? "Оформить служебную записку"
-        : item.id === "trip"
-          ? "Оформить служебное задание на командировку"
-          : item.id === "leave"
-            ? "Оформить заявление на отпуск"
-            : `Нужен шаблон: ${item.title}`;
     try {
       const conv = await createConversation(item.title);
-      if (typeof window !== "undefined") {
-        sessionStorage.setItem(
-          `sancire_pending_prompt_${conv.id}`,
-          JSON.stringify({ text: prompt, files: [] }),
-        );
-      }
+      sessionStorage.setItem(
+        `sancire_pending_prompt_${conv.id}`,
+        JSON.stringify({ text: `Нужен шаблон: ${item.title}`, files: [] }),
+      );
       await refreshConversations();
       navigate(`/chat/${conv.id}`);
-    } catch (e) {
-      console.error("Failed to start template conversation", e);
+    } catch {
       setPending(null);
+      showToast("Не удалось открыть диалог — попробуйте ещё раз");
     }
   }
   return (

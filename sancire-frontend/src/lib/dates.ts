@@ -16,16 +16,3 @@ export function greetingByHour(hour: number) {
   if (hour >= 12 && hour < 18) return "Добрый день";
   return "Добрый вечер";
 }
-export function formatShortDate(value: string) {
-  const date = new Date(value);
-  return date.toLocaleDateString("ru-RU", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-  });
-}
-export function truncateTitle(text: string, max = 52) {
-  const clean = text.replace(/\s+/g, " ").trim();
-  if (clean.length <= max) return clean || "Новый диалог";
-  return `${clean.slice(0, max - 1).trim()}…`;
-}

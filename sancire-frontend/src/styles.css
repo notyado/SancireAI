@@ -390,10 +390,6 @@ html.light .primary-btn.solid {
   animation: spin-border 2.4s linear infinite;
   opacity: 1;
 }
-.composer-shell.recording::before {
-  animation: spin-border 3.5s linear infinite;
-  opacity: 1;
-}
 .composer-shell.hero:hover {
   box-shadow: 0 0 0 8px color-mix(in srgb, var(--accent) 12%, transparent);
 }
@@ -715,42 +711,6 @@ html.light .primary-btn.solid {
     opacity: 1;
   }
 }
-.wave-bars {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  height: 22px;
-}
-.wave-bars span {
-  width: 2px;
-  height: 8px;
-  border-radius: 2px;
-  background: var(--accent);
-  animation: wave 1s var(--ease-out) infinite;
-}
-.wave-bars span:nth-child(2) {
-  animation-delay: 0.1s;
-}
-.wave-bars span:nth-child(3) {
-  animation-delay: 0.18s;
-}
-.wave-bars span:nth-child(4) {
-  animation-delay: 0.05s;
-}
-.wave-bars span:nth-child(5) {
-  animation-delay: 0.22s;
-}
-@keyframes wave {
-  0%,
-  100% {
-    height: 6px;
-    opacity: 0.55;
-  }
-  50% {
-    height: 18px;
-    opacity: 1;
-  }
-}
 .file-chip {
   display: flex;
   align-items: center;
@@ -818,30 +778,6 @@ html.light .primary-btn.solid {
   background: var(--surface);
   border: 1px solid var(--divider);
   backdrop-filter: blur(16px);
-}
-.ios-toggle {
-  width: 48px;
-  height: 28px;
-  border-radius: 999px;
-  background: var(--divider);
-  position: relative;
-  transition: background 250ms var(--ease-soft);
-}
-.ios-toggle.on {
-  background: linear-gradient(135deg, var(--accent-from), var(--accent-to));
-}
-.ios-toggle span {
-  position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: #fff;
-  transition: transform 250ms var(--ease-out);
-}
-.ios-toggle.on span {
-  transform: translateX(20px);
 }
 .toast {
   position: fixed;
@@ -1025,8 +961,6 @@ html.light .primary-btn.solid {
     transform: scale(1.05);
   }
 }
-
-
 
 /* Safe, readable Markdown rendering for assistant responses. */
 .assistant-body {
@@ -1276,15 +1210,6 @@ html.light .primary-btn.solid {
 }
 .audit-more { margin-top: 6px; font-size: 12.5px; color: var(--text-secondary); }
 
-/* ============ Sidebar mode icons ============ */
-.side-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-}
-
-
 /* ============ Centered chat title in the topbar ============ */
 .app-topbar-title {
   position: absolute;
@@ -1378,7 +1303,6 @@ html.light .primary-btn.solid {
   background: var(--divider);
 }
 
-
 /* Sidebar: "show more history" control */
 .side-more {
   display: block;
@@ -1394,7 +1318,6 @@ html.light .primary-btn.solid {
   background: color-mix(in srgb, var(--divider) 72%, transparent);
   color: var(--text);
 }
-
 
 /* ============ Mobile polish ============ */
 @media (max-width: 640px) {

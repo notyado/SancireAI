@@ -13,7 +13,7 @@ func TestSmokeSearch(t *testing.T) {
 	}
 	fmt.Println("chunks:", ix.Len())
 	q := "Какие обязательные этапы согласования проходит проект приказа?"
-	qt := tokenize(q)
+	qt := Tokenize(q)
 	fmt.Println("qkeys:", qt)
 	res := ix.Search(q, 5)
 	for _, s := range res {

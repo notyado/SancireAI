@@ -1,4 +1,3 @@
-"use client";
 import type { ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { IconMenu, IconMoon, IconSun } from "@/components/icons";

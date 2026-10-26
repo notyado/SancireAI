@@ -1,13 +1,19 @@
-"use client";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useApp } from "@/components/providers";
+import { authHeader } from "@/lib/chat-client";
 export default function SettingsPage() {
-  const { theme, setTheme, language, setLanguage, refreshConversations } = useApp();
+  const { theme, setTheme, language, setLanguage, refreshConversations, showToast } = useApp();
   const [confirm, setConfirm] = useState(false);
   const navigate = useNavigate();
   async function clearHistory() {
-    await fetch("/api/conversations", { method: "DELETE" });
+    try {
+      const res = await fetch("/api/conversations", { method: "DELETE", headers: authHeader() });
+      if (!res.ok) throw new Error(String(res.status));
+    } catch {
+      showToast("Не удалось очистить историю — попробуйте ещё раз");
+      return;
+    }
     await refreshConversations();
     setConfirm(false);
     navigate("/");

@@ -1,15 +1,27 @@
 package api
+
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
+
 	"github.com/golang-jwt/jwt/v5"
+
 	"sancireai/backend/internal/store"
 )
+
+// tokenIssuer is the `iss` claim of every token this service signs.
+const tokenIssuer = "sancireai"
+
 type contextKey string
+
+// UserContextKey is the request-context key holding the parsed *Claims.
 const UserContextKey contextKey = "user_claims"
+
+// Claims is the JWT payload: who the caller is and which role they have.
 type Claims struct {
 	UserID   string `json:"userId"`
 	Username string `json:"username"`
@@ -17,6 +29,8 @@ type Claims struct {
 	Name     string `json:"name"`
 	jwt.RegisteredClaims
 }
+
+// GenerateToken signs a session token for an authenticated user.
 func GenerateToken(user *store.User, secret string, ttl time.Duration) (string, error) {
 	now := time.Now().UTC()
 	claims := Claims{
@@ -27,12 +41,14 @@ func GenerateToken(user *store.User, secret string, ttl time.Duration) (string, 
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
 			IssuedAt:  jwt.NewNumericDate(now),
-			Issuer:    "sancireai",
+			Issuer:    tokenIssuer,
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString([]byte(secret))
 }
+
+// ParseToken validates a signed token and returns its claims.
 func ParseToken(tokenStr string, secret string) (*Claims, error) {
 	token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(token *jwt.Token) (any, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -46,9 +62,12 @@ func ParseToken(tokenStr string, secret string) (*Claims, error) {
 	if claims, ok := token.Claims.(*Claims); ok && token.Valid {
 		return claims, nil
 	}
-	return nil, fmt.Errorf("invalid token")
+	return nil, errors.New("invalid token")
 }
-// AuthMiddleware optionally extracts user claims from Bearer token
+
+// AuthMiddleware optionally extracts user claims from a Bearer token. Chat and
+// reader endpoints stay usable without a session; admin routes are guarded by
+// RequireAdmin instead.
 func AuthMiddleware(secret string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -65,16 +84,17 @@ func AuthMiddleware(secret string) func(http.Handler) http.Handler {
 		})
 	}
 }
-// RequireAdmin enforces DOU_Admin role or returns 403 Forbidden
+
+// RequireAdmin enforces the DOU_Admin role (п. 1.4 Регламента).
 func RequireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		claims, ok := r.Context().Value(UserContextKey).(*Claims)
 		if !ok || claims == nil {
-			http.Error(w, `{"error":"unauthorized","message":"Требуется авторизация"}`, http.StatusUnauthorized)
+			writeError(w, http.StatusUnauthorized, "unauthorized", "Требуется авторизация")
 			return
 		}
-		if claims.Role != "DOU_Admin" {
-			http.Error(w, `{"error":"forbidden","message":"Доступ разрешен только Администраторам ДОУ (п. 1.4 Регламента)"}`, http.StatusForbidden)
+		if claims.Role != store.RoleAdmin {
+			writeError(w, http.StatusForbidden, "forbidden", "Доступ разрешен только Администраторам ДОУ (п. 1.4 Регламента)")
 			return
 		}
 		next(w, r)

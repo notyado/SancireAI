@@ -3,8 +3,6 @@ package docx
 import (
 	"archive/zip"
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -27,6 +25,7 @@ var (
 	reCellOpen         = regexp.MustCompile(`<w:tc>`)
 	reCellClose        = regexp.MustCompile(`</w:tc>`)
 	reTextRun          = regexp.MustCompile(`<w:t(?: [^>]*)?>(.*?)</w:t>`)
+	reAnyTag           = regexp.MustCompile(`<[^>]+>`)
 )
 
 // GenerateModuleDocx creates a clean, filled .docx based on a module template.
@@ -36,32 +35,22 @@ func GenerateModuleDocx(templatesDir, moduleID string, values map[string]string)
 	if !ok {
 		return nil, "", fmt.Errorf("module %s not found in registry", moduleID)
 	}
-	// Validate required fields before touching the template.
-	for _, field := range mod.Fields {
-		if field.Required && !field.Routing {
-			if strings.TrimSpace(values[field.Key]) == "" {
-				return nil, "", fmt.Errorf("поле «%s» является обязательным", field.Label)
-			}
-		}
-	}
+	// Required values and template tokens are validated below, before any
+	// substitution happens (the template file itself is only ever read — AC-07).
 	tplPath := filepath.Join(templatesDir, mod.FileName)
 	tplData, err := os.ReadFile(tplPath)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to read template %s: %w", tplPath, err)
 	}
-	// Template integrity is verified (AC-07): the hash is computed for
-	// observability and the file is only ever opened for reading.
-	h := sha256.Sum256(tplData)
-	_ = hex.EncodeToString(h[:])
-
-	// Every non-routing required field must exist as a token in the template,
-	// otherwise the generated document would silently miss a requisite.
+	// One pass over the module fields: required values must be present, and
+	// every non-routing field must exist as a token in the template — otherwise
+	// the generated document would silently miss a requisite.
 	tokens := TemplateTokens(moduleID)
 	for _, field := range mod.Fields {
-		if field.Routing {
-			continue
+		if field.Required && !field.Routing && strings.TrimSpace(values[field.Key]) == "" {
+			return nil, "", fmt.Errorf("поле «%s» является обязательным", field.Label)
 		}
-		if !tokens[field.Key] {
+		if !field.Routing && !tokens[field.Key] {
 			return nil, "", fmt.Errorf("шаблон модуля %s не содержит поля %q", moduleID, field.Key)
 		}
 	}
@@ -117,11 +106,12 @@ func GenerateModuleDocx(templatesDir, moduleID string, values map[string]string)
 	return outBuf.Bytes(), outFileName, nil
 }
 
+// reUnsafeFileName covers the characters that are illegal in file names on
+// Windows/macOS/Linux or would break a Content-Disposition header.
+var reUnsafeFileName = regexp.MustCompile(`[/\\\"'<>|:*?\x00-\x1f]+`)
+
 func sanitizeFileName(s string) string {
-	s = strings.ReplaceAll(s, "/", "-")
-	s = strings.ReplaceAll(s, "\\", "-")
-	s = strings.ReplaceAll(s, "\"", "")
-	return strings.TrimSpace(s)
+	return strings.TrimSpace(reUnsafeFileName.ReplaceAllString(s, "-"))
 }
 
 type paraSpan struct {
@@ -336,8 +326,8 @@ func processDocumentXML(docXML string, values map[string]string) (string, error)
 		// Drop the whole paragraph when it became an empty fill line outside
 		// a table cell (table cells must keep at least one paragraph, so an
 		// emptied cell paragraph stays as a blank line).
-		newText := strings.TrimSpace(stripMarkupForCheck(paraXML))
-		origVisible := strings.TrimSpace(stripMarkupForCheck(origText))
+		newText := stripMarkupForCheck(paraXML)
+		origVisible := stripMarkupForCheck(origText)
 		if !drop && newText == "" && origVisible != "" && !span.inCell {
 			drop = true
 		}
@@ -366,9 +356,8 @@ func paragraphText(paraXML string) string {
 	return b.String()
 }
 
-// stripMarkupForCheck returns the visible text length check: it removes XML
-// tags from a paragraph fragment.
+// stripMarkupForCheck removes XML tags from a paragraph fragment and trims it,
+// leaving only the visible text.
 func stripMarkupForCheck(s string) string {
-	reTag := regexp.MustCompile(`<[^>]+>`)
-	return strings.TrimSpace(reTag.ReplaceAllString(s, ""))
+	return strings.TrimSpace(reAnyTag.ReplaceAllString(s, ""))
 }

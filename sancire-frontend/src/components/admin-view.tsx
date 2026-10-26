@@ -1,7 +1,6 @@
-"use client";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useApp } from "@/components/providers";
-import { getAuthToken } from "@/lib/chat-client";
+import { authHeader, jsonHeaders, ROLE_ADMIN } from "@/lib/chat-client";
 
 type Regulation = {
   id: string;
@@ -20,10 +19,8 @@ const REG_STATUSES: Record<string, { label: string; cls: string }> = {
   archived: { label: "В архиве", cls: "bg-white/5 text-[var(--text-secondary)] border-white/10" },
 };
 
-function authHeader(): Record<string, string> {
-  const token = getAuthToken();
-  return token ? { Authorization: `Bearer ${token}` } : {};
-}
+/** Role required by every /api/admin route (п. 1.4 Регламента). */
+
 type VersionItem = {
   id: string;
   code: string;
@@ -33,6 +30,17 @@ type VersionItem = {
   introducedAt: string;
   metadata?: any;
 };
+
+/** Live infrastructure numbers served by GET /api/admin/stats. */
+type AdminStats = {
+  modules: number;
+  kbChunks: number;
+  minRelevanceScore: number;
+  regulations: { total: number; active: number };
+  qdrant?: { available: boolean; collection: string; points: number; dimension: number; distance: string };
+  ollama?: { available: boolean; model: string; embedModel: string; models?: string[] };
+};
+
 export function AdminView() {
   const { user, setAuthModalOpen, showToast } = useApp();
   const [versions, setVersions] = useState<VersionItem[]>([]);
@@ -44,13 +52,26 @@ export function AdminView() {
   const [upTitle, setUpTitle] = useState("");
   const [upKind, setUpKind] = useState("Другое");
   const [upBusy, setUpBusy] = useState(false);
+  const [stats, setStats] = useState<AdminStats | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
-  const isAdmin = user?.role === "DOU_Admin";
+  const isAdmin = user?.role === ROLE_ADMIN;
+
+  const loadStats = useCallback(async () => {
+    try {
+      const res = await fetch("/api/admin/stats", { headers: authHeader() });
+      if (res.ok) setStats((await res.json()) as AdminStats);
+    } catch {
+      // Cards fall back to «нет данных» — the rest of the panel keeps working.
+    }
+  }, []);
+
   useEffect(() => {
     if (!isAdmin) return;
-    loadVersions();
+    void loadVersions();
     void loadRegs();
-  }, [isAdmin]);
+    void loadStats();
+    // loadVersions/loadRegs are stable within a render; only the role gates them.
+  }, [isAdmin, loadStats]);
 
   async function loadRegs() {
     try {
@@ -86,6 +107,7 @@ export function AdminView() {
       setUpTitle("");
       if (fileInput.current) fileInput.current.value = "";
       await loadRegs();
+      await loadStats();
     } catch {
       showToast("Ошибка сети при загрузке регламента");
     } finally {
@@ -103,6 +125,7 @@ export function AdminView() {
       }
       showToast(action === "activate" ? "Регламент активирован — уже используется в ответах" : "Регламент перемещён в архив");
       await loadRegs();
+      await loadStats();
     } catch {
       showToast("Ошибка сети");
     } finally {
@@ -120,6 +143,9 @@ export function AdminView() {
       }
       showToast("Регламент удалён");
       await loadRegs();
+      await loadStats();
+    } catch {
+      showToast("Ошибка сети при удалении регламента");
     } finally {
       setRegBusy(null);
     }
@@ -144,16 +170,10 @@ export function AdminView() {
   }
   async function loadVersions() {
     setLoading(true);
-    const token = getAuthToken();
     try {
-      const res = await fetch("/api/admin/versions", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setVersions(data);
-      }
-    } catch (e) {
+      const res = await fetch("/api/admin/versions", { headers: authHeader() });
+      if (res.ok) setVersions(await res.json());
+    } catch {
       showToast("Ошибка загрузки версий");
     } finally {
       setLoading(false);
@@ -161,14 +181,10 @@ export function AdminView() {
   }
   async function handleActivate(code: string) {
     setActionLoading(code);
-    const token = getAuthToken();
     try {
       const res = await fetch("/api/admin/versions/activate", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
+        headers: jsonHeaders(),
         body: JSON.stringify({ code }),
       });
       if (!res.ok) {
@@ -178,7 +194,7 @@ export function AdminView() {
       }
       showToast(`Версия ${code} успешно активирована без перезагрузки системы`);
       await loadVersions();
-    } catch (e) {
+    } catch {
       showToast("Ошибка сети при активации версии");
     } finally {
       setActionLoading(null);
@@ -220,22 +236,38 @@ export function AdminView() {
           мгновенно для всех запросов чата-консультанта без перезагрузки бэкенда.
         </p>
       </div>
-      {/* System Status Cards */}
+      {/* System status — live values from GET /api/admin/stats */}
       <div className="mt-8 grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="p-5 rounded-2xl border border-[var(--divider)] bg-[var(--surface)]">
           <span className="text-[12px] uppercase text-[var(--text-secondary)]">Векторная БД Qdrant</span>
-          <div className="mt-2 text-[20px] font-medium text-emerald-400">362 чанка</div>
-          <div className="mt-1 text-[12.5px] text-[var(--text-secondary)]">Коллекция dou_knowledge (1024 dim)</div>
+          <div className={`mt-2 text-[20px] font-medium ${stats?.qdrant?.available ? "text-emerald-400" : "text-amber-400"}`}>
+            {stats?.qdrant?.available ? `${stats.qdrant.points} точек` : "недоступен"}
+          </div>
+          <div className="mt-1 text-[12.5px] text-[var(--text-secondary)]">
+            {stats?.qdrant
+              ? `Коллекция ${stats.qdrant.collection} (${stats.qdrant.dimension || "?"} dim, ${stats.qdrant.distance})`
+              : "Проверьте SANCIRE_QDRANT_URL"}
+          </div>
         </div>
         <div className="p-5 rounded-2xl border border-[var(--divider)] bg-[var(--surface)]">
           <span className="text-[12px] uppercase text-[var(--text-secondary)]">Инференс Ollama</span>
-          <div className="mt-2 text-[20px] font-medium text-white">qwen3.5:4b</div>
-          <div className="mt-1 text-[12.5px] text-[var(--text-secondary)]">Локальный GPU On-Premise</div>
+          <div className={`mt-2 text-[20px] font-medium ${stats?.ollama?.available ? "text-white" : "text-amber-400"}`}>
+            {stats?.ollama?.available ? stats.ollama.model : "недоступен"}
+          </div>
+          <div className="mt-1 text-[12.5px] text-[var(--text-secondary)]">
+            {stats?.ollama?.models?.length ? `${stats.ollama.models.length} моделей в on-premise контуре` : "Локальный on-premise контур"}
+          </div>
         </div>
         <div className="p-5 rounded-2xl border border-[var(--divider)] bg-[var(--surface)]">
-          <span className="text-[12px] uppercase text-[var(--text-secondary)]">Модель эмбеддингов</span>
-          <div className="mt-2 text-[20px] font-medium text-white">qwen3-embedding</div>
-          <div className="mt-1 text-[12.5px] text-[var(--text-secondary)]">Cosine Distance • Safe Refusal &gt; 0.65</div>
+          <span className="text-[12px] uppercase text-[var(--text-secondary)]">Индекс и эмбеддинги</span>
+          <div className="mt-2 text-[20px] font-medium text-white">
+            {stats ? `${stats.kbChunks} фрагментов` : "—"}
+          </div>
+          <div className="mt-1 text-[12.5px] text-[var(--text-secondary)]">
+            {stats
+              ? `${stats.ollama?.embedModel ?? "эмбеддинги"} • порог схожести ≥ ${stats.minRelevanceScore} • регламентов: ${stats.regulations.active}/${stats.regulations.total}`
+              : "Локальная база знаний"}
+          </div>
         </div>
       </div>
       {/* Regulation lifecycle */}

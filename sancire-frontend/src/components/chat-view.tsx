@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Composer } from "@/components/composer";
 import { AssistantPending, MessageView } from "@/components/message-view";
 import { useApp, type ConversationRow, type MessageRow } from "@/components/providers";
-import { sendChatStream } from "@/lib/chat-client";
+import { authHeader, sendChatStream } from "@/lib/chat-client";
 import type { AttachedFile } from "@/db/schema";
 
 type ChatAction = "explain" | "clarify" | "expert";
@@ -20,6 +20,10 @@ export function ChatView({ conversationId }: { conversationId: string }) {
   const initializedPrompt = useRef(false);
   const requestInFlight = useRef(false);
   const requestVersion = useRef(0);
+  const rafId = useRef<number | null>(null);
+  const streamedContentRef = useRef("");
+  const streamingAsstIdRef = useRef<string | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     let ignore = false;
@@ -33,7 +37,7 @@ export function ChatView({ conversationId }: { conversationId: string }) {
     pinnedToBottom.current = true;
     const version = ++requestVersion.current;
 
-    void fetch(`/api/conversations/${encodeURIComponent(conversationId)}`)
+    void fetch(`/api/conversations/${encodeURIComponent(conversationId)}`, { headers: authHeader() })
       .then(async (response) => {
         if (!response.ok) {
           if (!ignore) setMissing(true);
@@ -82,11 +86,6 @@ export function ChatView({ conversationId }: { conversationId: string }) {
     setHeaderTitle(conversation?.title || "");
     return () => setHeaderTitle("");
   }, [conversation?.title, setHeaderTitle]);
-
-  const rafId = useRef<number | null>(null);
-  const streamedContentRef = useRef("");
-  const streamingAsstIdRef = useRef<string | null>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
 
   const flushStreamBatch = useCallback(() => {
     const asstId = streamingAsstIdRef.current;
@@ -194,7 +193,9 @@ export function ChatView({ conversationId }: { conversationId: string }) {
           acceptedByServer = acceptedByServer || started;
           console.warn("Chat stream ended before completion", error);
           try {
-            const response = await fetch(`/api/conversations/${encodeURIComponent(conversationId)}`);
+            const response = await fetch(`/api/conversations/${encodeURIComponent(conversationId)}`, {
+              headers: authHeader(),
+            });
             if (response.ok) {
               const canonical = await response.json() as { conversation: ConversationRow; messages: MessageRow[] };
               setConversation(canonical.conversation);
@@ -246,7 +247,7 @@ export function ChatView({ conversationId }: { conversationId: string }) {
     void askRef.current(followUp);
   }, []);
 
-  const handleAction = useCallback((action: "explain" | "clarify" | "expert", selection?: string) => {
+  const handleAction = useCallback((action: ChatAction, selection?: string) => {
     const text =
       action === "explain" ? "Объяснить проще" : action === "clarify" ? "Уточнить" : "Задать вопрос эксперту";
     void askRef.current(text, [], { action, selection });

@@ -1,8 +1,5 @@
-# Case materials / documents
+# Case materials / documents (source PDFs are never committed)
 *.pdf
-Ке*Банка*России*.pdf
-Кейс_Банка_России_ЦДОБР.pdf
-Кейс_Банка_России_ЦДОБР.pdf
 
 # Frontend dependencies & build outputs
 node_modules/

@@ -1,7 +1,7 @@
-"use client";
 import { memo, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { conversationGroup } from "@/lib/dates";
+import { authHeader, jsonHeaders, roleLabel, ROLE_ADMIN } from "@/lib/chat-client";
 import {
   IconChat,
   IconGrid,
@@ -18,9 +18,13 @@ import {
   IconX,
 } from "@/components/icons";
 import { useApp, type ConversationRow } from "@/components/providers";
+
 const GROUP_ORDER = ["Сегодня", "Вчера", "На прошлой неделе", "Ранее"];
+
+/** Duration of the `.history-item.leaving` collapse animation in styles.css. */
+const REMOVE_ANIMATION_MS = 280;
 export function Sidebar() {
-  const { conversations, sidebarOpen, setSidebarOpen, refreshConversations, user, setAuthModalOpen } = useApp();
+  const { conversations, modules, sidebarOpen, setSidebarOpen, refreshConversations, showToast, user, setAuthModalOpen } = useApp();
   const [query, setQuery] = useState("");
   const [histLimit, setHistLimit] = useState(60);
   const [confirmId, setConfirmId] = useState<string | null>(null);
@@ -41,22 +45,36 @@ export function Sidebar() {
     items: rest.filter((item) => conversationGroup(item.updatedAt) === label),
   })).filter((group) => group.items.length);
   async function togglePin(item: ConversationRow) {
-    await fetch(`/api/conversations/${item.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pinned: !item.pinned }),
-    });
+    try {
+      const res = await fetch(`/api/conversations/${item.id}`, {
+        method: "PATCH",
+        headers: jsonHeaders(),
+        body: JSON.stringify({ pinned: !item.pinned }),
+      });
+      if (!res.ok) throw new Error(String(res.status));
+    } catch {
+      showToast("Не удалось изменить закрепление диалога");
+    }
     await refreshConversations();
   }
-  async function remove(id: string) {
+
+  function remove(id: string) {
+    // The row collapses first; the request is sent when the animation is over.
     setLeaving(id);
-    window.setTimeout(async () => {
-      await fetch(`/api/conversations/${id}`, { method: "DELETE" });
+    window.setTimeout(() => void deleteConversation(id), REMOVE_ANIMATION_MS);
+  }
+  async function deleteConversation(id: string) {
+    try {
+      const res = await fetch(`/api/conversations/${id}`, { method: "DELETE", headers: authHeader() });
+      if (!res.ok) throw new Error(String(res.status));
+      if (pathname === `/chat/${id}`) routeTo("/");
+    } catch {
+      showToast("Не удалось удалить диалог");
+    } finally {
       await refreshConversations();
       setConfirmId(null);
       setLeaving(null);
-      if (pathname === `/chat/${id}`) routeTo("/");
-    }, 260);
+    }
   }
   function openChat(id: string) {
     setSidebarOpen(false);
@@ -100,7 +118,7 @@ export function Sidebar() {
           >
             <span className="nav-ico"><IconGrid size={17} /></span>
             <span>Конструктор документов</span>
-            <span className="nav-badge">7</span>
+            {modules?.length ? <span className="nav-badge">{modules.length}</span> : null}
           </button>
           <button
             type="button"
@@ -110,7 +128,7 @@ export function Sidebar() {
             <span className="nav-ico"><IconShield size={17} /></span>
             <span>Аудитор DOCX</span>
           </button>
-          {user?.role === "DOU_Admin" ? (
+          {user?.role === ROLE_ADMIN ? (
             <button
               type="button"
               className={`nav-item ${pathname === "/admin" ? "active" : ""}`}
@@ -212,7 +230,7 @@ export function Sidebar() {
                 <div className="text-[13px] font-medium truncate">{user.name}</div>
                 <div className="flex items-center gap-1 text-[11px] text-[var(--text-secondary)]">
                   <IconUser size={12} />
-                  {user.role === "DOU_Admin" ? "Администратор ДОУ" : "Сотрудник"}
+                  {roleLabel(user.role)}
                 </div>
               </div>
               <span className="text-[11px] text-emerald-400 font-medium">Сменить</span>
