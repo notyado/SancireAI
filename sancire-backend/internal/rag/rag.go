@@ -9,11 +9,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -220,85 +218,49 @@ func (e *Engine) VectorSearchText(ctx context.Context, query string, limit int) 
 // Grounded LLM answer — strictly from provided fragments, with citations
 // ---------------------------------------------------------------------------
 
-// Errors reported by GroundedAnswerStream.
-var (
-	// ErrGroundedRefused — the model refused (НЕТ_ОТВЕТА / explicit refusal)
-	// before any token was shown to the user.
-	ErrGroundedRefused = errors.New("grounded answer: model refused")
-	// ErrGroundedInvalid — generation finished but failed post-validation;
-	// `flushed` tells the caller whether tokens were already displayed.
-	ErrGroundedInvalid = errors.New("grounded answer: failed validation")
-)
+// SystemPrompt is the canonical system prompt guiding SancireAI behavior across all turns.
+const SystemPrompt = `Ты — SancireAI, интеллектуальный цифровой ассистент по нормативным регламентам и документообороту Банка России (Инструкция по ДОУ № ОД-184, Матрица визирования, Методические рекомендации).
 
-// reEarlyRefusal detects a model refusal inside the decision buffer.
-var reEarlyRefusal = regexp.MustCompile(`(?i)НЕТ_ОТВЕТА|не могу (ответить|предоставить|помочь)|в предоставленных материалах (нет|не содерж)|нет достаточн(ых|о) (данных|информац)|данных во фрагментах (нет|недостаточ)|не относится к (документообороту|моей специализации|компетенц)|не регламентируется (во фрагментах|в предоставленных)|нет однозначного ответа`)
+Твоя цель — быть компетентным, живым, дружелюбным и полезным помощником:
+1. Если предоставлены нормативные ФРАГМЕНТЫ — отвечай строго по ним, формулируй ответ четко и структурированно (Markdown), цитаты оборачивай в тег {{s:section_id}}текст{{/s}} с реальным section_id из фрагментов.
+2. Если вопрос общий, приветственный или разговорный ("привет", "можем поговорить", "кто ты", "помоги мне") — отвечай дружелюбно и естественно, поддерживай диалог, кратко расскажи, чем можешь помочь (поиск по регламентам ДОУ, составление приказов M-01..M-07, аудит черновиков .docx).
+3. Если нормативных фрагментов недостаточно для однозначного ответа — объясни общую логику ДОУ, предложи переформулировать вопрос или обратиться к эксперту ЦДОБР. Не отвечай односложными отказами.`
 
-// GroundedAnswerStream generates a grounded answer with live token delivery.
-// Tokens are buffered until a decision point — the first citation {{s:…}} or
-// ~200 runes — so a refusal never reaches the screen; if a refusal is
-// detected the generation is cancelled immediately. After the decision point
-// deltas flow to onToken live. The caller validates the accumulated text;
-// `flushed` reports whether tokens were already shown.
-func (e *Engine) GroundedAnswerStream(ctx context.Context, query string, chunks []ScoredChunk, onToken func(string)) (string, bool, error) {
+// groundedPrompt builds the prompt with context when chunks are available.
+func groundedPrompt(query string, chunks []ScoredChunk) (system, user string) {
 	if len(chunks) == 0 {
-		return "", false, errors.New("no context chunks")
+		return SystemPrompt, query
 	}
+	var ctxText strings.Builder
+	for i, c := range chunks {
+		ctxText.WriteString(fmt.Sprintf("--- ФРАГМЕНТ [%d] (section_id: %s) ---\n", i+1, c.SectionID))
+		ctxText.WriteString(fmt.Sprintf("Документ: %s\nПункт: %s\nТекст: %s\n\n", c.DocumentTitle, c.Clause, c.Text))
+	}
+	user = fmt.Sprintf("ФРАГМЕНТЫ:\n%s\nВОПРОС ПОЛЬЗОВАТЕЛЯ:\n%s", ctxText.String(), query)
+	return SystemPrompt, user
+}
+
+// GroundedAnswerStream streams an answer from the local LLM. When chunks are provided,
+// they are passed as normative evidence; otherwise it answers general/conversational turns.
+func (e *Engine) GroundedAnswerStream(ctx context.Context, query string, chunks []ScoredChunk, history []ChatMessage, onToken func(string)) (string, bool, error) {
 	system, user := groundedPrompt(query, chunks)
 	gctx, cancel := context.WithTimeout(ctx, generateTimeout)
 	defer cancel()
 
 	var acc strings.Builder
 	flushed := false
-	aborted := false
-	_, callErr := e.callLLMWithSystem(gctx, system, user, nil, func(delta string) {
-		if aborted {
-			return
-		}
+	_, callErr := e.callLLMWithSystem(gctx, system, user, history, func(delta string) {
 		acc.WriteString(delta)
-		if !flushed {
-			if reEarlyRefusal.MatchString(acc.String()) {
-				aborted = true
-				cancel() // stop wasting generation — nothing was shown yet
-				return
-			}
-			if strings.Contains(acc.String(), "{{s:") || utf8.RuneCountInString(acc.String()) >= flushRunes {
-				flushed = true
-				if onToken != nil {
-					onToken(acc.String())
-				}
-			}
-			return
-		}
+		flushed = true
 		if onToken != nil {
 			onToken(delta)
 		}
 	})
 	full := acc.String()
-	if aborted {
-		return "", false, ErrGroundedRefused
-	}
 	if callErr != nil {
 		return full, flushed, callErr
 	}
 	return full, flushed, nil
-}
-
-// groundedPrompt builds the strict system + user prompts for grounded answers.
-func groundedPrompt(query string, chunks []ScoredChunk) (system, user string) {
-	var ctxText strings.Builder
-	for i, c := range chunks {
-		ctxText.WriteString(fmt.Sprintf("--- ФРАГМЕНТ [%d] (section_id: %s) ---\n", i+1, c.SectionID))
-		ctxText.WriteString(fmt.Sprintf("Документ: %s\nПункт: %s\nТекст: %s\n\n", c.DocumentTitle, c.Clause, c.Text))
-	}
-	system = `Ты — SancireAI, интеллектуальный помощник по документообороту (Инструкция по ДОУ № ОД-184, Матрица визирования, Методические рекомендации).
-СТРОГИЕ ПРАВИЛА:
-1. Отвечай ТОЛЬКО по переданным фрагментам. Запрещено добавлять факты из памяти модели.
-2. Каждое нормативное утверждение или цитату оборачивай в тег {{s:section_id}}текст{{/s}}, где section_id берёшь ТОЛЬКО из списка фрагментов (без выдумывания). Первую цитату ставь в самом начале ответа.
-3. Отвечай на русском, структурированно (Markdown: краткие списки, выделения). Сохраняй номера пунктов и даты из фрагментов дословно.
-4. Если во фрагментах нет достаточного ответа на вопрос — ответь ровно одной строкой: НЕТ_ОТВЕТА
-5. Не пересказывай весь фрагмент — отвечай на заданный вопрос.`
-	user = fmt.Sprintf("ФРАГМЕНТЫ:\n%s\nВОПРОС ПОЛЬЗОВАТЕЛЯ:\n%s", ctxText.String(), query)
-	return system, user
 }
 
 // ---------------------------------------------------------------------------

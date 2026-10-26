@@ -76,6 +76,7 @@ func SetupRouter(h *Handler) http.Handler {
 			r.Get("/stats", RequireAdmin(h.handleAdminStats))
 			r.Get("/versions", RequireAdmin(h.handleListVersions))
 			r.Post("/versions/activate", RequireAdmin(h.handleActivateVersion))
+			r.Post("/modules", RequireAdmin(h.handleSaveModule))
 			// Regulation lifecycle: upload → activate → archive → delete
 			r.Get("/regulations", RequireAdmin(h.handleListRegulations))
 			r.Post("/regulations/upload", RequireAdmin(h.handleUploadRegulation))

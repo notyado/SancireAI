@@ -2,11 +2,9 @@ package dialog
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"regexp"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/rs/zerolog/log"
 
@@ -24,7 +22,6 @@ const (
 	weak             = 3.0  // below this the lexical evidence is only "related"
 	vecRescue        = 0.62 // cosine score that may rescue a weak lexical match
 	maxContextChunks = 5    // fragments forwarded to the model in one prompt
-	minAIRunes       = 120  // a model answer shorter than this is not trusted
 )
 
 // Window parameters of bestSentence / firstSentence (runes).
@@ -77,6 +74,50 @@ func (e *Engine) compose(req Request, text, norm string) Outcome {
 		vecConfident = lexTop >= weak || vec[0].Score >= vecRescue
 	}
 
+	// Merge vector candidates lexical search may have missed / promote them
+	// when lexical confidence is weak.
+	if vecConfident {
+		inHits := map[string]bool{}
+		for _, h := range hits {
+			inHits[h.Chunk.ID] = true
+		}
+		var extra []kb.Scored
+		for _, v := range vec {
+			if v.SectionID == "" || inHits[v.SectionID] {
+				continue
+			}
+			extra = append(extra, kb.Scored{Chunk: chunkFromScored(v), Score: confident + 1})
+		}
+		if lexTop < confident {
+			hits = append(extra, hits...)
+		} else {
+			hits = append(hits, extra...)
+		}
+	}
+
+	// 1. Intelligent AI answer — streams live when LLM is available.
+	if e.llm != nil && e.llm.LLMHealthy(ctx) {
+		candidates := hits
+		if len(candidates) > maxContextChunks {
+			candidates = candidates[:maxContextChunks]
+		}
+		ans, _, err := e.llm.GroundedAnswerStream(ctx, text, toScoredChunks(candidates), req.History, func(s string) {
+			emit(req.Token, s)
+		})
+		if err == nil && len(strings.TrimSpace(ans)) > 0 {
+			meta := aiMeta(ans, candidates, norm)
+			if len(meta.Sources) == 0 {
+				meta.Intent = "conversational"
+				meta.FollowUps = []string{"Порядок согласования приказа", "Сформировать приказ по модулю", "Проверить готовый документ .docx"}
+			}
+			return Outcome{Answer: ans, Meta: meta}
+		}
+		if err != nil {
+			log.Warn().Err(err).Msg("llm answer stream failed, falling back to deterministic compose")
+		}
+	}
+
+	// 2. Deterministic Fallbacks (offline or when LLM fails)
 	if lexTop < weak && !vecConfident {
 		return e.reply(req, refusalText, Meta{
 			Intent:    "answer.notFound",
@@ -104,52 +145,6 @@ func (e *Engine) compose(req Request, text, norm string) Outcome {
 		})
 	}
 
-	// Merge vector candidates lexical search may have missed / promote them
-	// when lexical confidence is weak.
-	if vecConfident {
-		inHits := map[string]bool{}
-		for _, h := range hits {
-			inHits[h.Chunk.ID] = true
-		}
-		var extra []kb.Scored
-		for _, v := range vec {
-			if v.SectionID == "" || inHits[v.SectionID] {
-				continue
-			}
-			extra = append(extra, kb.Scored{Chunk: chunkFromScored(v), Score: confident + 1})
-		}
-		if lexTop < confident {
-			hits = append(extra, hits...)
-		} else {
-			hits = append(hits, extra...)
-		}
-	}
-
-	// AI answer attempt — tokens stream live after a safety decision point;
-	// the accumulated text is validated before it is trusted as the answer.
-	aiShown := ""
-	if e.llm != nil && len(hits) > 0 && e.llm.LLMHealthy(ctx) {
-		candidates := hits
-		if len(candidates) > maxContextChunks {
-			candidates = candidates[:maxContextChunks]
-		}
-		ans, flushed, err := e.llm.GroundedAnswerStream(ctx, text, toScoredChunks(candidates), func(s string) {
-			emit(req.Token, s)
-		})
-		if err == nil && groundedOK(ans, candidates) {
-			return Outcome{Answer: ans, Meta: aiMeta(ans, candidates, norm)}
-		}
-		if err != nil && !errors.Is(err, rag.ErrGroundedRefused) && !errors.Is(err, rag.ErrGroundedInvalid) {
-			log.Warn().Err(err).Msg("grounded answer stream failed, falling back to deterministic compose")
-		}
-		if flushed && len(ans) >= 120 {
-			// Part of the model answer is already on screen — keep it and
-			// append the verified deterministic reply underneath.
-			aiShown = ans
-		}
-		// nothing shown / unusable → deterministic answer below
-	}
-
 	top := hits[0].Chunk
 	sentence := bestSentence(top, text)
 	primaryNegative := reNegative.MatchString(sentence)
@@ -159,19 +154,6 @@ func (e *Engine) compose(req Request, text, norm string) Outcome {
 		b.WriteString("**Важно:** материалы прямо указывают, что этот вопрос **не регламентирован** (или регламентирован с оговоркой) — структуру и порядок «по умолчанию» не рекомендую придумывать.\n\n")
 	}
 	isProcess := reProcessQ.MatchString(norm)
-
-	// finish streams `content` (the AI part, if any, was already streamed)
-	// and keeps the full displayed text in the Outcome.
-	finish := func(content string, meta Meta) Outcome {
-		if aiShown != "" {
-			emit(req.Token, content)
-			return Outcome{Answer: aiShown + "\n\n" + content, Meta: meta}
-		}
-		return e.reply(req, content, meta)
-	}
-	if aiShown != "" {
-		b.WriteString("**Модель не прошла проверку на цитируемость — дозываю строго по текстам материалов.**\n\n")
-	}
 
 	sources := []Source{sourceOf(top)}
 	used := map[string]bool{top.ID: true}
@@ -208,7 +190,7 @@ func (e *Engine) compose(req Request, text, norm string) Outcome {
 				Process: &Process{Title: "Опорные пункты по вопросу", Steps: steps},
 			}
 			meta.FollowUps = followUpsFor(top, true)
-			return finish(b.String(), meta)
+			return e.reply(req, b.String(), meta)
 		}
 	} else if len(hits) > 1 {
 		h := hits[1]
@@ -219,7 +201,7 @@ func (e *Engine) compose(req Request, text, norm string) Outcome {
 
 	meta := Meta{Intent: "answer", Sources: sources}
 	meta.FollowUps = followUpsFor(top, isProcess)
-	return finish(b.String(), meta)
+	return e.reply(req, b.String(), meta)
 }
 
 // ---------------------------------------------------------------------------
@@ -260,26 +242,6 @@ func toScoredChunks(hits []kb.Scored) []rag.ScoredChunk {
 		})
 	}
 	return out
-}
-
-// groundedOK validates a model answer before it is shown to the user.
-func groundedOK(ans string, candidates []kb.Scored) bool {
-	if strings.Contains(ans, "НЕТ_ОТВЕТА") {
-		return false
-	}
-	if utf8.RuneCountInString(ans) < minAIRunes {
-		return false
-	}
-	ids := map[string]bool{}
-	for _, h := range candidates {
-		ids[h.Chunk.ID] = true
-	}
-	for _, m := range reCite.FindAllStringSubmatch(ans, -1) {
-		if len(m) > 1 && ids[m[1]] {
-			return true
-		}
-	}
-	return false
 }
 
 // aiMeta collects sources for every cited fragment of an AI answer.

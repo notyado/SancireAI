@@ -85,7 +85,7 @@ func Load() Config {
 		QdrantCollection:  getEnv("SANCIRE_QDRANT_COLLECTION", "dou_knowledge"),
 		OllamaURL:         getEnv("SANCIRE_OLLAMA_URL", "http://localhost:11434"),
 		LLMModel:          getEnv("SANCIRE_LLM_MODEL", "qwen3.5:4b"),
-		EmbedModel:        getEnv("SANCIRE_EMBED_MODEL", "qwen3-embedding:0.6b"),
+		EmbedModel:        getEnv("SANCIRE_EMBED_MODEL", "qwen3-embed"),
 		MinRelevanceScore: minScore,
 		EmbedTimeout:      embedTimeout,
 		JWTSecret:         secret,

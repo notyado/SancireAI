@@ -57,6 +57,10 @@ type Handler struct {
 
 // NewHandler wires the store, the RAG engine and the dialog engine together.
 func NewHandler(cfg config.Config, s *store.Store, r *rag.Engine) *Handler {
+	// Dynamically load extra modules if custom definitions exist
+	_ = docx.LoadModulesFromFile(filepath.Join(cfg.DataDir, "modules.json"))
+	_ = docx.LoadModulesFromFile(filepath.Join(cfg.CorpusDir, "modules.json"))
+
 	dlg := dialog.NewEngine(cfg.TemplatesDir, cfg.CorpusDir)
 	dlg.UseLLM(r)
 	h := &Handler{
@@ -250,7 +254,7 @@ const actionClarify = "clarify"
 // generateTurn routes one chat turn either to the deterministic dialog engine
 // (wizard / knowledge / audit) or to the local LLM for the «Объяснить» and
 // «Эксперт» actions. It persists wizard draft state and generated artifacts.
-func (h *Handler) generateTurn(r *http.Request, conv *store.Conversation, userContent string, body chatBody, token func(string)) (string, any, error) {
+func (h *Handler) generateTurn(r *http.Request, conv *store.Conversation, userContent string, body chatBody, history []rag.ChatMessage, token func(string)) (string, any, error) {
 	if body.Action == rag.ActionExplain || body.Action == rag.ActionExpert {
 		if h.rag == nil {
 			return "", nil, errors.New("LLM engine is not configured")
@@ -264,11 +268,12 @@ func (h *Handler) generateTurn(r *http.Request, conv *store.Conversation, userCo
 		dText = body.Selection
 	}
 	out := h.dialog.Respond(dialog.Request{
-		Ctx:   r.Context(),
-		Text:  dText,
-		Files: body.Files,
-		Draft: conv.Draft,
-		Token: token,
+		Ctx:     r.Context(),
+		Text:    dText,
+		Files:   body.Files,
+		Draft:   conv.Draft,
+		Token:   token,
+		History: history,
 	})
 	if out.Artifact != nil {
 		id := uuid.NewString()
@@ -355,6 +360,14 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	firstTurn := len(historyMsgs) <= 1
 
+	chatHistory := make([]rag.ChatMessage, 0, len(historyMsgs))
+	for _, m := range historyMsgs {
+		chatHistory = append(chatHistory, rag.ChatMessage{
+			Role:    m.Role,
+			Content: m.Content,
+		})
+	}
+
 	// Check if client expects SSE streaming
 	wantsSSE := strings.Contains(r.Header.Get("Accept"), "text/event-stream") || r.URL.Query().Get("stream") == "true"
 	if wantsSSE {
@@ -380,7 +393,7 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		tokenCallback := func(token string) {
 			sendSSE("token", map[string]string{"token": token})
 		}
-		ans, meta, err := h.generateTurn(r, conv, userContent, body, tokenCallback)
+		ans, meta, err := h.generateTurn(r, conv, userContent, body, chatHistory, tokenCallback)
 		if r.Context().Err() != nil {
 			// Client cancelled/aborted the request: keep whatever was produced,
 			// but there is nobody left to send it to.
@@ -405,7 +418,7 @@ func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Standard non-streaming JSON response
-	ans, meta, err := h.generateTurn(r, conv, userContent, body, nil)
+	ans, meta, err := h.generateTurn(r, conv, userContent, body, chatHistory, nil)
 	if err != nil {
 		log.Error().Err(err).Msg("chat turn failed")
 		ans = chatFailureText
@@ -583,6 +596,21 @@ func (h *Handler) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 // generator can never drift apart.
 func (h *Handler) handleListModules(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, docx.Modules())
+}
+
+// handleSaveModule POST /api/admin/modules allows dynamic registration of modules at runtime.
+func (h *Handler) handleSaveModule(w http.ResponseWriter, r *http.Request) {
+	var mod docx.ModuleDefinition
+	if err := json.NewDecoder(r.Body).Decode(&mod); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	if mod.ID == "" || mod.Title == "" {
+		writeError(w, http.StatusBadRequest, "validation_error", "Поля 'id' и 'title' обязательны")
+		return
+	}
+	docx.RegisterModule(mod)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "module": mod})
 }
 
 // handleAdminStats GET /api/admin/stats returns the live infrastructure numbers

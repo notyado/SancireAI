@@ -30,11 +30,12 @@ type File struct {
 
 // Request is one inbound chat turn.
 type Request struct {
-	Ctx   context.Context
-	Text  string
-	Files []File
-	Draft any
-	Token func(string)
+	Ctx     context.Context
+	Text    string
+	Files   []File
+	Draft   any
+	Token   func(string)
+	History []rag.ChatMessage
 }
 
 // ArtifactOut is a generated file that the handler must persist as an artifact.
@@ -215,21 +216,23 @@ func (e *Engine) Respond(req Request) Outcome {
 		// fall through: the turn is a brand-new command (handled below)
 	}
 
-	// 3. Intents.
-	if isGreeting(norm) {
-		return e.reply(req, greetingText, Meta{
-			Intent:    "greeting",
-			FollowUps: []string{"Что ты умеешь?", "Согласование внутреннего документа", "Приказ о вводе ИС в эксплуатацию (М-01)"},
-		})
+	// 3. Offline intents (only when LLM is unavailable; when LLM is active, it handles greetings and smalltalk naturally).
+	if e.llm == nil || !e.llm.LLMHealthy(req.Ctx) {
+		if isGreeting(norm) {
+			return e.reply(req, greetingText, Meta{
+				Intent:    "greeting",
+				FollowUps: []string{"Что ты умеешь?", "Согласование внутреннего документа", "Приказ о вводе ИС в эксплуатацию (М-01)"},
+			})
+		}
+		if isSmallTalk(norm) {
+			return e.reply(req, smallTalkText, Meta{
+				Intent:    "smallTalk",
+				FollowUps: []string{"Порядок согласования приказа", "Сформировать документ по модулю", "Проверить готовый документ"},
+			})
+		}
 	}
 	if out, ok := answerDateOrTime(e, req, norm); ok {
 		return out
-	}
-	if isSmallTalk(norm) {
-		return e.reply(req, smallTalkText, Meta{
-			Intent:    "smallTalk",
-			FollowUps: []string{"Порядок согласования приказа", "Сформировать документ по модулю", "Проверить готовый документ"},
-		})
 	}
 	if reFeedback.MatchString(norm) {
 		return e.reply(req, feedbackText, Meta{
