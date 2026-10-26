@@ -1,8 +1,8 @@
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode, type ComponentProps } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { AuditReport, GeneratedDocument, MessageMeta, ProcessStep, SourceRef, WizardMeta } from "@/db/schema";
-import { IconAlert, IconCheck, IconCopy, IconDownload, IconInfo, IconShield } from "@/components/icons";
+import type { AuditReport, MessageMeta, ProcessStep, SourceRef } from "@/db/schema";
+import { IconAlert, IconCheck, IconCopy, IconInfo, IconShield } from "@/components/icons";
 import { authHeader } from "@/lib/chat-client";
 import { useApp, type MessageRow } from "@/components/providers";
 
@@ -115,99 +115,6 @@ function ProcessDiagramView({ title = "Этапы процесса", steps }: { 
         <div className="mt-4 overflow-hidden rounded-[20px] bg-[var(--divider)] px-4 py-3 text-[14.5px] leading-relaxed">
           <div className="font-medium">{open.title}</div>
           <p className="mt-1 text-[var(--text-secondary)]">{open.description}</p>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-function DocumentCardView({
-  document,
-  onToast,
-  onFollowUp,
-}: {
-  document: GeneratedDocument;
-  onToast: (text: string) => void;
-  onFollowUp: (text: string) => void;
-}) {
-  const [busy, setBusy] = useState(false);
-
-  // The generated .docx lives on the server as an artifact; the card only
-  // carries its id, so there is nothing to edit or re-download locally.
-  async function download() {
-    if (!document.artifactId) {
-      onToast("Файл не сохранён на сервере — сформируйте документ ещё раз");
-      return;
-    }
-    setBusy(true);
-    try {
-      const response = await fetch(`/api/artifacts/${encodeURIComponent(document.artifactId)}`, {
-        headers: authHeader(),
-      });
-      if (!response.ok) throw new Error(String(response.status));
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const link = window.document.createElement("a");
-      link.href = url;
-      link.download = document.fileName || `${document.title}.docx`;
-      link.click();
-      URL.revokeObjectURL(url);
-    } catch {
-      onToast("Не удалось скачать файл — попробуйте ещё раз");
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <div className="doc-card">
-      <div className="px-5 pb-2 pt-5">
-        <p className="text-[12.5px] uppercase tracking-[0.08em] text-[var(--text-secondary)]">{document.kind}</p>
-        <h3 className="mt-2 text-[18px] font-medium tracking-[-0.02em]">{document.title}</h3>
-        <p className="mt-2 text-[14.5px] text-[var(--text-secondary)]">{document.preview}</p>
-      </div>
-      <div className="doc-card-actions">
-        <button type="button" onClick={() => void download()} disabled={busy}>
-          <span className="inline-flex items-center gap-2">
-            <IconDownload size={16} /> {busy ? "Готовлю файл…" : "Скачать .docx"}
-          </span>
-        </button>
-        <button type="button" onClick={() => onFollowUp("Проверить готовый документ")}>
-          Проверить документ
-        </button>
-        <button type="button" onClick={() => onFollowUp("Какой будет маршрут визирования?")}>
-          Маршрут визирования
-        </button>
-      </div>
-    </div>
-  );
-}
-function WizardProgressCard({ wizard }: { wizard: WizardMeta }) {
-  const pct = wizard.total > 0 ? Math.min(100, Math.round(((wizard.phase === "confirm" ? wizard.total : wizard.step - 1) / wizard.total) * 100)) : 0;
-  const entries = Object.entries(wizard.values || {}).filter(([, value]) => String(value || "").trim() !== "");
-  return (
-    <div className="wizard-card">
-      <div className="wizard-card-head">
-        <span className="wizard-module-code">{wizard.code}</span>
-        <span className="wizard-module-title">{wizard.title}</span>
-        <span className="wizard-progress-label">
-          {wizard.phase === "confirm" ? "готово" : `${wizard.step}/${wizard.total}`}
-        </span>
-      </div>
-      <div className="wizard-progress">
-        <span style={{ width: `${pct}%` }} />
-      </div>
-      {wizard.phase === "ask" && wizard.field ? (
-        <p className="wizard-field-line">
-          <span className="wizard-field-label">{wizard.field.label}</span>
-          {wizard.field.required ? <span className="wizard-required">обязательно</span> : null}
-        </p>
-      ) : null}
-      {entries.length ? (
-        <div className="wizard-values">
-          {entries.map(([key, value]) => (
-            <span key={key} className="wizard-chip" title={key}>
-              {String(value).length > 42 ? `${String(value).slice(0, 42)}…` : value}
-            </span>
-          ))}
         </div>
       ) : null}
     </div>
@@ -360,40 +267,8 @@ function MessageViewBase({
         {isStreaming ? renderContent(message.content, sources) : staticContent}
         {isStreaming ? <span className="streaming-cursor" aria-hidden="true" /> : null}
       </div>
-      {meta?.wizard ? <WizardProgressCard wizard={meta.wizard} /> : null}
       {meta?.process ? <ProcessDiagramView title={meta.process.title} steps={meta.process.steps} /> : null}
-      {meta?.document ? (
-        <DocumentCardView document={meta.document} onToast={showToast} onFollowUp={onFollowUp} />
-      ) : null}
       {meta?.audit ? <AuditCard audit={meta.audit} /> : null}
-      {meta?.notFound ? (
-        <div className="not-found">
-          <p>Если в регламенте нет точного ответа, лучше спросить человека, чем догадываться.</p>
-          <button type="button" className="pill mt-3" onClick={() => onAction("expert")}>
-            Задать вопрос эксперту
-          </button>
-        </div>
-      ) : null}
-      {meta?.followUps?.length ? (
-        <div className="mt-4 flex flex-wrap gap-2">
-          {meta.followUps.map((item: string) => (
-            <button
-              key={item}
-              type="button"
-              className="pill"
-              onClick={() => {
-                if (item === "Задать вопрос эксперту") onAction("expert");
-                else if (item.startsWith("Открыть ")) {
-                  const source = sources[0];
-                  if (source) setReader({ sectionId: source.id });
-                } else onFollowUp(item);
-              }}
-            >
-              {item}
-            </button>
-          ))}
-        </div>
-      ) : null}
       {toolbar ? (
         <div
           className="mini-toolbar"

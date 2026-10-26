@@ -50,8 +50,7 @@ func (e *Engine) compose(req Request, text, norm string) Outcome {
 	}
 
 	if e.ix == nil || e.ix.Len() == 0 {
-		return e.reply(req, indexMissingText, Meta{Intent: "answer.notFound", NotFound: true,
-			FollowUps: []string{"Что ты умеешь?", "Приказ о вводе ИС в эксплуатацию (М-01)", "Задать вопрос эксперту"}})
+		return e.reply(req, indexMissingText, Meta{Intent: "answer.notFound", NotFound: true})
 	}
 	hits := e.ix.Search(text, searchLimit)
 	lexTop := 0.0
@@ -60,9 +59,6 @@ func (e *Engine) compose(req Request, text, norm string) Outcome {
 	}
 
 	// Vector fusion — only when Qdrant is up; harmless when it is not.
-	// A vector hit may SUPPLEMENT lexical evidence or rescue a query only
-	// when it is very confident on its own: casual/noise queries whose
-	// embeddings land near arbitrary chunks must not bypass the refusal.
 	var vec []rag.ScoredChunk
 	if e.llm != nil {
 		if v, err := e.llm.VectorSearchText(ctx, text, vectorLimit); err == nil {
@@ -97,10 +93,17 @@ func (e *Engine) compose(req Request, text, norm string) Outcome {
 
 	// 1. Intelligent AI answer — streams live when LLM is available.
 	if e.llm != nil && e.llm.LLMHealthy(ctx) {
-		candidates := hits
-		if len(candidates) > maxContextChunks {
-			candidates = candidates[:maxContextChunks]
+		// Only attach normative chunks when retrieval confidence is high.
+		// For conversational follow-ups, continuations ("а дальше", "заполни его данными")
+		// or queries without high-confidence KB matches, do NOT inject noisy fragments!
+		var candidates []kb.Scored
+		if vecConfident || lexTop >= confident {
+			candidates = hits
+			if len(candidates) > maxContextChunks {
+				candidates = candidates[:maxContextChunks]
+			}
 		}
+
 		ans, _, err := e.llm.GroundedAnswerStream(ctx, text, toScoredChunks(candidates), req.History, func(s string) {
 			emit(req.Token, s)
 		})
@@ -108,7 +111,6 @@ func (e *Engine) compose(req Request, text, norm string) Outcome {
 			meta := aiMeta(ans, candidates, norm)
 			if len(meta.Sources) == 0 {
 				meta.Intent = "conversational"
-				meta.FollowUps = []string{"Порядок согласования приказа", "Сформировать приказ по модулю", "Проверить готовый документ .docx"}
 			}
 			return Outcome{Answer: ans, Meta: meta}
 		}
@@ -120,9 +122,8 @@ func (e *Engine) compose(req Request, text, norm string) Outcome {
 	// 2. Deterministic Fallbacks (offline or when LLM fails)
 	if lexTop < weak && !vecConfident {
 		return e.reply(req, refusalText, Meta{
-			Intent:    "answer.notFound",
-			NotFound:  true,
-			FollowUps: []string{"Порядок согласования внутреннего документа", "Проверить готовый документ", "Задать вопрос эксперту"},
+			Intent:   "answer.notFound",
+			NotFound: true,
 		})
 	}
 	if lexTop < confident && !vecConfident {
@@ -138,10 +139,9 @@ func (e *Engine) compose(req Request, text, norm string) Outcome {
 		}
 		b.WriteString("\nЕсли вопрос не про эти разделы — уточните формулировку или задайте его эксперту ДОУ.")
 		return e.reply(req, b.String(), Meta{
-			Intent:    "answer.related",
-			Sources:   sources,
-			NotFound:  true,
-			FollowUps: []string{"Задать вопрос эксперту", "Порядок согласования внутреннего документа", "Что ты умеешь?"},
+			Intent:   "answer.related",
+			Sources:  sources,
+			NotFound: true,
 		})
 	}
 
@@ -163,7 +163,6 @@ func (e *Engine) compose(req Request, text, norm string) Outcome {
 
 	if isProcess {
 		b.WriteString("\n**Порядок (по пунктам материалов):**\n")
-		steps := []ProcessStep{}
 		n := 0
 		for _, h := range hits {
 			if used[h.Chunk.ID] {
@@ -172,35 +171,25 @@ func (e *Engine) compose(req Request, text, norm string) Outcome {
 			n++
 			stepSentence := firstSentence(h.Chunk.Text)
 			b.WriteString(fmt.Sprintf("%d. %s — {{s:%s}}%s{{/s}}\n", n, h.Chunk.Clause, h.Chunk.ID, stepSentence))
-			steps = append(steps, ProcessStep{
-				ID:          fmt.Sprintf("step-%d", n),
-				Title:       h.Chunk.Clause,
-				Description: stepSentence,
-			})
 			sources = append(sources, sourceOf(h.Chunk))
 			used[h.Chunk.ID] = true
 			if n >= 3 {
 				break
 			}
 		}
-		if len(steps) > 0 {
-			meta := Meta{
-				Intent:  "answer.process",
-				Sources: sources,
-				Process: &Process{Title: "Опорные пункты по вопросу", Steps: steps},
-			}
-			meta.FollowUps = followUpsFor(top, true)
-			return e.reply(req, b.String(), meta)
+		meta := Meta{
+			Intent:  "answer.process",
+			Sources: sources,
 		}
+		return e.reply(req, b.String(), meta)
 	} else if len(hits) > 1 {
 		h := hits[1]
 		b.WriteString(fmt.Sprintf("\nДополнительно — %s («%s»): {{s:%s}}%s{{/s}}\n", h.Chunk.Clause, h.Chunk.DocumentTitle, h.Chunk.ID, h.Chunk.Excerpt(260)))
 		sources = append(sources, sourceOf(h.Chunk))
 	}
-	b.WriteString("\nСсылка на источник — карточка ниже. Если нужен порядок целиком (пошагово) — скажите «Показать пошагово».")
+	b.WriteString("\nСсылка на источник — карточка ниже.")
 
 	meta := Meta{Intent: "answer", Sources: sources}
-	meta.FollowUps = followUpsFor(top, isProcess)
 	return e.reply(req, b.String(), meta)
 }
 
@@ -261,16 +250,10 @@ func aiMeta(ans string, candidates []kb.Scored, norm string) Meta {
 			sources = append(sources, sourceOf(c))
 		}
 	}
-	var top *kb.Chunk
-	if len(candidates) > 0 {
-		top = candidates[0].Chunk
+	return Meta{
+		Intent:  "answer.ai",
+		Sources: sources,
 	}
-	meta := Meta{
-		Intent:    "answer.ai",
-		Sources:   sources,
-		FollowUps: followUpsFor(top, reProcessQ.MatchString(norm)),
-	}
-	return meta
 }
 
 const (
@@ -293,8 +276,6 @@ func sourceOf(c *kb.Chunk) Source {
 }
 
 // bestSentence extracts the span of the chunk that overlaps the query most.
-// For table-like texts (the visa matrix) sentence splitting is useless, so we
-// slide a window and keep the one containing the most distinct query terms.
 func bestSentence(c *kb.Chunk, query string) string {
 	text := strings.TrimSpace(c.Text)
 	if text == "" {
@@ -305,8 +286,6 @@ func bestSentence(c *kb.Chunk, query string) string {
 		return text
 	}
 
-	// Distinct, meaningful query terms (stopwords are already filtered out by
-	// the index tokeniser, so scoring is not diluted by «можно», «какой», …).
 	var terms []string
 	seen := map[string]bool{}
 	for _, t := range kb.Tokenize(query) {
@@ -320,8 +299,6 @@ func bestSentence(c *kb.Chunk, query string) string {
 		return c.Excerpt(maxSentenceRunes)
 	}
 
-	// Slide a rune window over the lower-cased text and keep the window with
-	// the most distinct query terms.
 	lowerRunes := []rune(strings.ToLower(strings.ReplaceAll(text, "ё", "е")))
 	bestStart, bestScore := 0, -1
 	for start := 0; start < len(lowerRunes); start += sentenceStep {
@@ -344,7 +321,6 @@ func bestSentence(c *kb.Chunk, query string) string {
 	if bestScore <= 0 {
 		return c.Excerpt(maxSentenceRunes)
 	}
-	// Align to word boundaries.
 	lo := bestStart
 	for lo > 0 && runes[lo] != ' ' && runes[lo] != '\n' {
 		lo--
@@ -367,7 +343,6 @@ func splitSentences(s string) []string {
 	for i, r := range runes {
 		cur = append(cur, r)
 		if r == '.' || r == '!' || r == '?' {
-			// sentence ends at punctuation followed by whitespace / end
 			if i+1 >= len(runes) || runes[i+1] == ' ' || runes[i+1] == '\n' {
 				parts = append(parts, string(cur))
 				cur = cur[:0]
@@ -395,7 +370,6 @@ func firstSentence(s string) string {
 	return c.Excerpt(firstSentenceRunes)
 }
 
-// truncateRunes cuts s to at most n runes without splitting a character.
 func truncateRunes(s string, n int) string {
 	runes := []rune(s)
 	if len(runes) <= n {
@@ -404,23 +378,11 @@ func truncateRunes(s string, n int) string {
 	return string(runes[:n])
 }
 
-// suffixIfTruncated is the ellipsis that marks a truncated fragment.
 func suffixIfTruncated(s string, n int) string {
 	if len([]rune(s)) > n {
 		return "…"
 	}
 	return ""
-}
-
-func followUpsFor(top *kb.Chunk, isProcess bool) []string {
-	base := []string{"Показать пошагово", "Сформировать документ по модулю", "Проверить готовый документ", "Задать вопрос эксперту"}
-	if top != nil && top.Category == "visa_matrix" {
-		base = []string{"Какой маршрут визирования для приказа?", "Кто визирует проект документа?", "Сформировать документ по модулю", "Задать вопрос эксперту"}
-	}
-	if isProcess {
-		base = []string{"Сформировать документ по модулю", "Какие сроки согласования?", "Проверить готовый документ", "Задать вопрос эксперту"}
-	}
-	return base
 }
 
 // ---------------------------------------------------------------------------
@@ -484,14 +446,4 @@ func auditAnswer(r *docx.AuditReport) string {
 	}
 	b.WriteString("\n\nПолный отчёт — в карточке ниже.")
 	return b.String()
-}
-
-func auditFollowUps(r *docx.AuditReport) []string {
-	if r == nil {
-		return []string{"Порядок согласования проекта документа", "Задать вопрос эксперту"}
-	}
-	if r.Status == docx.TrafficLightRed {
-		return []string{"Как устранить замечания?", "Какой будет маршрут визирования?", "Порядок согласования проекта документа"}
-	}
-	return []string{"Какой будет маршрут визирования?", "Сформировать документ по модулю", "Задать вопрос эксперту"}
 }

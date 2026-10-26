@@ -27,7 +27,7 @@ const (
 	probeCacheTTL     = 30 * time.Second
 	embedTimeout      = 8 * time.Second
 	searchTimeout     = 8 * time.Second
-	generateTimeout   = 90 * time.Second
+	generateTimeout   = 180 * time.Second
 	explainTimeout    = 60 * time.Second
 	pushChunkTimeout  = 10 * time.Second
 
@@ -35,9 +35,8 @@ const (
 	corpusBatch         = 500 // chunks per LoadCorpus push
 	streamRunes         = 24  // runes per SSE delta
 	streamDelay         = 8 * time.Millisecond
-	flushRunes          = 200 // buffered runes before the refusal gate opens
-	maxHistoryMsgs      = 12  // prior conversation turns forwarded to the model
-	maxHistoryRunes     = 4000
+	maxHistoryMsgs      = 24  // prior conversation turns forwarded to the model
+	maxHistoryRunes     = 10000
 	explainSnippetRunes = 200
 
 	vectorDistance = "Cosine" // metric of the Qdrant collection
@@ -221,10 +220,11 @@ func (e *Engine) VectorSearchText(ctx context.Context, query string, limit int) 
 // SystemPrompt is the canonical system prompt guiding SancireAI behavior across all turns.
 const SystemPrompt = `Ты — SancireAI, интеллектуальный цифровой ассистент по нормативным регламентам и документообороту Банка России (Инструкция по ДОУ № ОД-184, Матрица визирования, Методические рекомендации).
 
-Твоя цель — быть компетентным, живым, дружелюбным и полезным помощником:
-1. Если предоставлены нормативные ФРАГМЕНТЫ — отвечай строго по ним, формулируй ответ четко и структурированно (Markdown), цитаты оборачивай в тег {{s:section_id}}текст{{/s}} с реальным section_id из фрагментов.
-2. Если вопрос общий, приветственный или разговорный ("привет", "можем поговорить", "кто ты", "помоги мне") — отвечай дружелюбно и естественно, поддерживай диалог, кратко расскажи, чем можешь помочь (поиск по регламентам ДОУ, составление приказов M-01..M-07, аудит черновиков .docx).
-3. Если нормативных фрагментов недостаточно для однозначного ответа — объясни общую логику ДОУ, предложи переформулировать вопрос или обратиться к эксперту ЦДОБР. Не отвечай односложными отказами.`
+ПРАВИЛА РАБОТЫ:
+1. НЕ ЗДОРОВАЙСЯ В ДИАЛОГЕ: Если в истории переписки уже есть хотя бы одно сообщение — категорически запрещено здороваться заново («Привет», «Здравствуйте», «Приветствую», «Я — SancireAI» и т.п.) или представляться. Сразу переходи к сути ответа и продолжай диалог.
+2. ПРАВДИВОСТЬ И ДОСТОВЕРНОСТЬ (НЕ ЛГИ): Отвечай строго по нормативным материалам. Если предоставлены нормативные ФРАГМЕНТЫ — формулируй ответ строго по ним, а точные цитаты оформляй тегом {{s:section_id}}текст{{/s}}. Не выдумывай несуществующие пункты, номера приказов или требования. Если данных в предоставленных материалах нет — честно и прямо скажи, что в базе знаний нет информации по данному вопросу.
+3. СТРОГИЙ ЗАПРЕТ НА КОД: Категорически запрещено писать программный код на Python (включая python-docx, openpyxl и т.п.), bash или любом другом языке программирования. Запрещено оформлять блоки кода. Ты эксперт по делопроизводству, а не программист. Если пользователь просит составить/заполнить приказ, служебную записку или «прислать файл docx» — выведи готовый проект текста документа прямо в сообщении на русском языке (шапка, заголовок, преамбула, пункты распоряжения, перечень согласующих лиц), пояснив, что ты предоставляешь готовый проект текста.
+4. ПОЛНОТА И ЗАВЕРШЕННОСТЬ: Отвечай развернуто, структурированно и всегда доводи мысль до логического завершения. Никогда не обрывай текст на полуслове.`
 
 // groundedPrompt builds the prompt with context when chunks are available.
 func groundedPrompt(query string, chunks []ScoredChunk) (system, user string) {
@@ -236,7 +236,7 @@ func groundedPrompt(query string, chunks []ScoredChunk) (system, user string) {
 		ctxText.WriteString(fmt.Sprintf("--- ФРАГМЕНТ [%d] (section_id: %s) ---\n", i+1, c.SectionID))
 		ctxText.WriteString(fmt.Sprintf("Документ: %s\nПункт: %s\nТекст: %s\n\n", c.DocumentTitle, c.Clause, c.Text))
 	}
-	user = fmt.Sprintf("ФРАГМЕНТЫ:\n%s\nВОПРОС ПОЛЬЗОВАТЕЛЯ:\n%s", ctxText.String(), query)
+	user = fmt.Sprintf("НОРМАТИВНЫЕ МАТЕРИАЛЫ:\n%s\nЗАПРОС ПОЛЬЗОВАТЕЛЯ:\n%s", ctxText.String(), query)
 	return SystemPrompt, user
 }
 
@@ -603,8 +603,7 @@ func (e *Engine) GenerateAnswer(ctx context.Context, query, action, selection st
 	case ActionExpert:
 		streamResponse(tokenCallback, expertReplyText)
 		return expertReplyText, MessageMeta{
-			Expert:    true,
-			FollowUps: []string{"Порядок согласования приказа", "Открыть библиотеку шаблонов"},
+			Expert: true,
 		}, nil
 	default:
 		return "", MessageMeta{}, fmt.Errorf("unsupported chat action %q", action)
@@ -677,7 +676,8 @@ func (e *Engine) callLLMWithSystem(ctx context.Context, systemPrompt, userMessag
 		"keep_alive": ollamaKeepAlive,
 		"options": map[string]any{
 			"temperature": 0.2,
-			"num_predict": 1024,
+			"num_ctx":     16384,
+			"num_predict": 4096,
 		},
 	}
 	b, err := json.Marshal(reqBody)

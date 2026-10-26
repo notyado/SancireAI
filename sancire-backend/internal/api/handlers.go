@@ -279,18 +279,6 @@ func (h *Handler) generateTurn(r *http.Request, conv *store.Conversation, userCo
 		id := uuid.NewString()
 		if err := h.store.SaveArtifact(id, out.Artifact.FileName, out.Artifact.Title, out.Artifact.Kind, out.Artifact.Preview, out.Artifact.Data); err != nil {
 			log.Error().Err(err).Msg("failed to save artifact")
-		} else if out.Meta.Document != nil {
-			out.Meta.Document.ArtifactID = id
-		}
-	}
-	if out.ChangeDraft {
-		var draft any = out.NewDraft
-		if out.ClearDraft {
-			// Explicit JSON null clears the draft; nil would mean "keep".
-			draft = json.RawMessage("null")
-		}
-		if _, err := h.store.UpdateConversation(conv.ID, nil, nil, draft); err != nil {
-			log.Error().Err(err).Msg("failed to persist wizard draft")
 		}
 	}
 	return out.Answer, out.Meta, nil
